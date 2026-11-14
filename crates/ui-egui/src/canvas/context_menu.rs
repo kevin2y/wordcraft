@@ -72,6 +72,12 @@ pub(super) fn context_menu(app: &mut WordApp, ui: &mut Ui) {
             ui.close();
         }
     };
+    // A read-only PDF has nothing to cut, paste or format: the engine refuses every mutating
+    // command. Offer just Copy, which `WordApp::execute` routes to the PDF text layer.
+    if app.session.pdf_view().is_some() {
+        item(ui, app, "Copy", "edit.copy", json!({}));
+        return;
+    }
     if let Some(issue) = app.canvas.context_issue.clone() {
         let sugg: Vec<String> = issue
             .get("suggestions")

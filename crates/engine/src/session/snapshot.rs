@@ -3,8 +3,27 @@ use super::snapshot_types::{EditSnapshot, SNAPSHOT_HEAD};
 use super::{Document, Session, StoryRef, next_document_id};
 
 impl Session {
-    /// Replace the document (open/new).
+    /// Show a PDF instead of the document. A blank document still backs the session (commands
+    /// read `doc` unconditionally), but the canvas draws the PDF and nothing may edit or save it.
+    pub fn set_pdf_view(&mut self, pdf: crate::PdfView, path: &str) {
+        let blank = self.blank_document();
+        self.set_document(blank);
+        self.pdf = Some(std::sync::Arc::new(pdf));
+        self.path = Some(std::path::PathBuf::from(path));
+        self.view.mode = wordcraft_layout::ViewMode::Print;
+        self.view.read_mode = false;
+        self.dirty = false;
+        self.relayout();
+    }
+
+    /// The PDF currently shown, if any. Cheap to hold while painting a frame.
+    pub fn pdf_view(&self) -> Option<std::sync::Arc<crate::PdfView>> {
+        self.pdf.clone()
+    }
+
+    /// Replace the document (open/new). Any other open or New closes a PDF view.
     pub fn set_document(&mut self, doc: Document) {
+        self.pdf = None;
         self.autocap = None;
         let replaced = self.document_id;
         self.md_source = None;
@@ -74,6 +93,8 @@ impl Session {
             pending: _,
             last_highlight: _,
             path: _,
+            // A read-only PDF view is not part of the document or its history.
+            pdf: _,
             file_name: _,
             // The custom dictionary file, like the file path: host wiring, not an edit.
             user_dict_path: _,

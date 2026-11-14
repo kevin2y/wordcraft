@@ -93,6 +93,7 @@ impl Session {
             pending,
             last_highlight: wordcraft_doc::props::Highlight::Yellow,
             path,
+            pdf: None,
             file_name,
             user_dict_path: None,
             dirty,

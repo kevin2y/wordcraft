@@ -26,6 +26,7 @@ mod links;
 mod margins;
 mod navigation;
 mod pages;
+mod pdf;
 mod reading;
 mod rulers;
 mod story;
@@ -67,6 +68,8 @@ use pages::{
     drawing_grid, drawing_grid_step, gridline_cells, page_image, page_key, page_render_options, page_shows, shown_layout, texel_aligned_rect,
     view_key, visible_tiles,
 };
+use pdf::{pdf_mouse, pdf_paint_overlay};
+pub use pdf::{pdf_selected_text, position_at_scroll, scroll_to_position};
 pub(crate) use reading::turn_read_page;
 #[cfg(test)]
 use reading::{READ_NAV_BAR, RESIZE_SETTLE, place_read_pages};
@@ -110,6 +113,23 @@ fn canvas_scroll_thumb(visuals: &mut egui::Visuals, t: &Tokens) {
     visuals.widgets.active.bg_fill = t.text_dim;
 }
 
+/// A selection in a read-only PDF: two `(page, character index)` endpoints in the PDF's text
+/// layer. Deliberately not a `wordcraft_engine::Selection`: a PDF has no editable `Document`,
+/// so nothing here can enter the undo history or be saved.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PdfSelection {
+    pub anchor: (usize, usize),
+    pub focus: (usize, usize),
+    pub dragging: bool,
+}
+
+impl PdfSelection {
+    /// The endpoints in reading order.
+    pub fn ends(&self) -> ((usize, usize), (usize, usize)) {
+        if self.anchor <= self.focus { (self.anchor, self.focus) } else { (self.focus, self.anchor) }
+    }
+}
+
 pub struct CanvasState {
     /// Page rasters: (key, what the page showed, texture). The key ([`page_key`]) includes the
     /// raster scale; what the page showed ([`page_shows`]) doesn't, so a zoom can tell whether
@@ -140,7 +160,7 @@ pub struct CanvasState {
     /// last frame's layout. Survives changing page sizes, even when the caret stays elsewhere.
     pub(crate) read_first_visible: Option<Pos>,
     /// An animated column-turn destination; intermediate offsets are allowed during the motion.
-    read_target_page: Option<usize>,
+    pub(crate) read_target_page: Option<usize>,
     pub caret_visible_since: f64,
     /// The caret's colour and the fingerprint of where it was worked out ([`caret_color_at`]).
     caret_bg: Option<(u64, Color32)>,
@@ -160,8 +180,30 @@ pub struct CanvasState {
     pub last_font_color: String,
     pub last_shading: String,
     pub open_url: Option<String>,
+    /// Text selection in a read-only PDF, or `None` for an ordinary document.
+    pub pdf_selection: Option<PdfSelection>,
+    /// A clicked PDF link asks for a jump to (page, distance from the page top in points).
+    pub pdf_goto: Option<(usize, f32)>,
+    /// A saved reading position (page, distance from the page top in points) waiting for the
+    /// first frame that has the new file's page rects.
+    pub(crate) restore_view: Option<(usize, f32)>,
+    /// The link under the pointer (page, link index), for hover feedback.
+    pub pdf_hover_link: Option<(usize, usize)>,
+    /// Identity of the PDF view last frame, so switching files drops the stale selection.
+    pub pdf_doc_ptr: Option<usize>,
+    /// Page at the top of the viewport in a PDF, for the status bar (a PDF has no caret).
+    pub pdf_current_page: Option<usize>,
+    /// A `ui.pdf.copy` result waiting to reach the system clipboard at the end of the frame.
+    pub pdf_copy_text: Option<String>,
     /// Screen rects of pages last frame (for the control channel: page ↔ screen coordinates).
     pub page_rects: Vec<Rect>,
+    /// The document those rects were laid out for. A freshly opened file has no rects of its
+    /// own until its first frame, and the previous file's must not describe its reading place.
+    pub(crate) page_rects_document: Option<u64>,
+    /// Last frame's page rects in **content** coordinates (before the scroll offset and the
+    /// canvas origin are applied). `page_rects` are screen coordinates; a saved reading place
+    /// has to be measured against the same coordinates as `scroll_offset`.
+    pub(crate) page_content_rects: Vec<Rect>,
     /// While the vertical scrollbar is dragged: the page at the top of the window (0-based),
     /// which a tip beside the pointer names (#2551).
     pub scrollbar_page: Option<usize>,
@@ -405,7 +447,16 @@ impl Default for CanvasState {
             last_font_color: "C00000".into(),
             last_shading: "FFF2CC".into(),
             open_url: None,
+            pdf_selection: None,
+            pdf_goto: None,
+            restore_view: None,
+            pdf_hover_link: None,
+            pdf_doc_ptr: None,
+            pdf_current_page: None,
+            pdf_copy_text: None,
             page_rects: Vec::new(),
+            page_rects_document: None,
+            page_content_rects: Vec::new(),
             scrollbar_page: None,
             viewed_page: None,
             scale: PX_PER_PT,
@@ -1113,6 +1164,8 @@ fn paint_pages(pass: PagePaint<'_>) -> PagePaintOutput {
         max_tex,
         grid_story,
     } = pass;
+    let pdf_view = app.session.pdf_view();
+    let pdf_mode = pdf_view.is_some();
     let mut visible_tile_keys = HashSet::new();
     let mut rendered = 0;
     let mut rects = Vec::with_capacity(geo.rects.len());
@@ -1122,8 +1175,10 @@ fn paint_pages(pass: PagePaint<'_>) -> PagePaintOutput {
         let (band_top, band_bot) = geo.bands.get(i).copied().unwrap_or((0.0, sr.height()));
         // A Web/Draft page can be arbitrarily tall. Shrinking the whole page into one GPU
         // texture makes the text blurry; split those pages into native-resolution tiles.
+        // PDF pages are one bitmap each, already capped by the viewer; never split them
+        // into tiles (the tile path would ask the document renderer for their pixels).
         let width_scale = (geo.scale * ppp).min(max_tex / page.w.max(1.0)).max(0.05);
-        let tiled = page.h.clamp(1.0, 1e6) * width_scale > max_tex;
+        let tiled = !pdf_mode && page.h.clamp(1.0, 1e6) * width_scale > max_tex;
         let scale_px = if tiled { width_scale } else { width_scale.min(max_tex / page.h.clamp(1.0, 1e6)).max(0.05) };
         let tile_height_px = TILE_HEIGHT_PX.min(max_tex as usize).max(1);
         // Hide White Space shows only a band of the page; everything below paints into it.
@@ -1149,11 +1204,15 @@ fn paint_pages(pass: PagePaint<'_>) -> PagePaintOutput {
             && !forced
             && app.canvas.textures.get(&i).is_some_and(|(_, showed, tex)| *showed == shows && stretch_fits(tex.size()[0], page.w, scale_px));
         if visible && !tiled && !fresh && !stretched && (forced || rendered < 2 || !app.canvas.textures.contains_key(&i) && rendered < 4) {
-            let mut opts = page_render_options(app, dim_body);
-            opts.hinting &= hinted;
-            // Only on the page it is on: the `Pos` can't match an object of another page.
-            opts.display.hide_object = hidden.as_ref().filter(|(page, _)| *page == i).map(|(_, p)| p.clone());
-            let img = wordcraft_render::render_page(page_doc(app), page, scale_px, &opts);
+            let img = if let Some(pdf) = &pdf_view {
+                pdf.render(i, scale_px)
+            } else {
+                let mut opts = page_render_options(app, dim_body);
+                opts.hinting &= hinted;
+                // Only on the page it is on: the `Pos` can't match an object of another page.
+                opts.display.hide_object = hidden.as_ref().filter(|(page, _)| *page == i).map(|(_, p)| p.clone());
+                wordcraft_render::render_page(page_doc(app), page, scale_px, &opts)
+            };
             let ci = page_image(&img);
             match app.canvas.textures.get_mut(&i) {
                 Some((k, showed, tex)) => {
@@ -1173,7 +1232,11 @@ fn paint_pages(pass: PagePaint<'_>) -> PagePaintOutput {
             ui.ctx().request_repaint();
         }
         let current_scale = geo.scale * ppp;
-        let visual_sr = if fresh && (scale_px - current_scale).abs() <= 0.0001_f32.max(current_scale.abs() * 0.0001) {
+        // A PDF bitmap may have been scaled down to fit the raster budget, so its pixel
+        // dimensions are not the page's screen size: stretch it to the page rectangle.
+        let visual_sr = if pdf_mode {
+            sr
+        } else if fresh && (scale_px - current_scale).abs() <= 0.0001_f32.max(current_scale.abs() * 0.0001) {
             app.canvas.textures.get(&i).map_or(sr, |(_, _, tex)| texel_aligned_rect(sr, tex.size_vec2(), ppp))
         } else {
             sr
@@ -1245,6 +1308,11 @@ fn paint_pages(pass: PagePaint<'_>) -> PagePaintOutput {
             painter.image(tex.id(), visual_sr, Rect::from_min_max(pos2(0.0, 0.0), pos2(1.0, 1.0)), Color32::WHITE);
         }
         let page_scale = page_screen_scale(visual_sr, page, geo.scale);
+        // PDF-only overlays: the selected text and the hovered link sit on top of the page
+        // bitmap. Both are drawn in page points and use the same scale as the bitmap.
+        if let Some(pdf) = &pdf_view {
+            pdf_paint_overlay(app, &painter, pdf.as_ref(), i, visual_sr, page_scale, t);
+        }
         // Header/footer editing chrome.
         if let StoryRef::Part(id) = app.session.sel.focus.story {
             let sect_body = page.body;
@@ -1344,7 +1412,11 @@ fn handle_primary_pointer(
     } else
     // Draw Table / Eraser own the mouse while on (no caret moves); else the usual editing.
     if !middle_gesture && !crate::table_pen::pointer(app, ui, resp, rects, layout, geo.scale) {
-        mouse(app, ui, resp, rects, layout, geo.scale);
+        if app.session.pdf_view().is_some() {
+            pdf_mouse(app, ui, resp, rects, layout, geo.scale);
+        } else {
+            mouse(app, ui, resp, rects, layout, geo.scale);
+        }
     }
 }
 
@@ -1442,13 +1514,21 @@ fn finish_canvas_frame(finish: CanvasFinish<'_>, out: egui::scroll_area::ScrollA
         crate::content_controls::clicks(app, &resp);
     }
     let secondary_clicked = resp.secondary_clicked() && !middle_gesture;
-    handle_secondary_selection(app, &resp, &rects, layout, geo, secondary_clicked);
+    // A read-only PDF has no editable caret, objects or equations: a right-click must not move
+    // the blank placeholder document's selection or look up suggestions for it. The menu still
+    // opens at the pointer below.
+    if app.session.pdf_view().is_none() {
+        handle_secondary_selection(app, &resp, &rects, layout, geo, secondary_clicked);
+    }
     // Shift+F10 opens the same menu below the caret, for the selection or the word there (#821).
     let from_keys = std::mem::take(&mut app.canvas.context_menu_from_keys);
     // A click on the equation frame's options strip opens the equation's menu below the strip.
     let eq_strip = app.canvas.eq_options.map(|f| f.strip).filter(|r| resp.clicked() && resp.interact_pointer_pos().is_some_and(|p| r.contains(p)));
     if from_keys {
-        context_suggestions(app);
+        // Shift+F10 must not look up suggestions for the blank placeholder behind a PDF.
+        if app.session.pdf_view().is_none() {
+            context_suggestions(app);
+        }
         app.canvas.context_menu_at = caret_screen(app).map(|(p, h)| p + egui::vec2(0.0, h));
     } else if let Some(r) = eq_strip {
         app.canvas.context_menu_at = Some(r.left_bottom());
@@ -1627,12 +1707,62 @@ fn live_selection_screen_rects(app: &mut WordApp, rects: &[Rect], scale: f32) ->
 pub fn show(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     let full = ui.available_rect_before_wrap();
+    // While a PDF is shown, the pages above are empty sheets in the PDF's own sizes and each
+    // raster comes from the PDF view instead of the document renderer.
+    let pdf_view = app.session.pdf_view();
+    // Another file (or a plain document) replaced this PDF: its text-layer indices are stale.
+    let pdf_ptr = pdf_view.as_ref().map(|p| std::sync::Arc::as_ptr(p) as usize);
+    if app.canvas.pdf_doc_ptr != pdf_ptr {
+        app.canvas.pdf_doc_ptr = pdf_ptr;
+        app.canvas.pdf_selection = None;
+        app.canvas.pdf_hover_link = None;
+        app.canvas.pdf_goto = None;
+        app.canvas.pdf_current_page = None;
+        // The texture keys of an empty PDF sheet can match an empty document's page. Drop the
+        // cached rasters so the first frame really renders the PDF bitmaps.
+        app.canvas.textures.clear();
+        app.canvas.tiles.clear();
+    }
+    let pdf_mode = pdf_view.is_some();
     let layout = prepare_layout(app, ui, full);
     let view = prepare_view(app, ui, full, &layout);
+    // A file opened with a saved reading place scrolls there on this first frame, instead of
+    // following the caret or the navigation pane. The offset may lie beyond the scroll range of
+    // the file open before, so work from this frame's geometry rather than last frame's maximum.
+    if app.canvas.restore_view.is_some() || app.canvas.pdf_goto.is_some() {
+        app.canvas.scroll_to_caret = false;
+        app.canvas.nav_to_caret = false;
+        app.canvas.read_target_page = None;
+        app.canvas.scroll_max = (view.geo.size - view.area.size()).max(egui::Vec2::ZERO);
+    }
     let scroll_target = if hold_scroll_for_preview(app) { None } else { update_caret_scroll(app, &view) };
     let motion = scroll_motion(app, ui, full, &view);
+    // The reading place saved for the file that just opened. It waits for a frame with this
+    // file's page rects; a link clicked in the same frame (`pdf_goto`) still wins below.
+    if let Some((page, top)) = app.canvas.restore_view
+        && let Some(to) = scroll_to_position(&view.geo.rects, view.geo.scale, page.min(view.geo.rects.len().saturating_sub(1)), top)
+    {
+        app.canvas.scroll_request = Some(to);
+        app.canvas.restore_view = None;
+    }
+    // A clicked PDF link (or `ui.pdf.goto`) scrolls to its target page. `edit.goto` moves a
+    // caret and is refused in the read-only view, so PDF navigation stays in the UI layer.
+    if let Some((page, top)) = app.canvas.pdf_goto.take()
+        && let Some(to) = scroll_to_position(&view.geo.rects, view.geo.scale, page, top)
+    {
+        app.canvas.scroll_request = Some(to);
+    }
     let (scroll_area, scroll_base) = configure_scroll_area(app, ui, &view, motion);
     let CanvasView { area, hruler, vruler, paper, zooming, hinted, geo, dim_body, grid_story, caret, rescaled, .. } = view;
+    // A PDF has no caret for the status bar to locate, so derive the current page from the
+    // scroll position instead. `geo.rects` and `scroll_offset` share the content coordinate
+    // system; the offset is last frame's, one frame behind a fresh jump at most.
+    if pdf_mode {
+        let y = app.canvas.scroll_offset.y + 80.0;
+        let last = geo.rects.len().saturating_sub(1);
+        let first = geo.rects.iter().position(|r| r.bottom() > y).unwrap_or(last);
+        app.canvas.pdf_current_page = Some(first.min(last));
+    }
     let mut origin = area.min;
     let mut ui_area = ui.new_child(egui::UiBuilder::new().max_rect(area));
     // The bars are drawn with `ui_area`'s style; what the pages draw gets the inherited one back.
@@ -1691,6 +1821,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         app.canvas.textures.retain(|k, _| *k < n && geo.rects.get(*k).is_some_and(|r| r.translate(content_origin.to_vec2()).intersects(near)));
         app.canvas.tiles.retain(|id, _| visible_tile_keys.contains(id));
         app.canvas.page_rects = rects.clone();
+        app.canvas.page_content_rects = geo.rects.clone();
+        app.canvas.page_rects_document = Some(app.session.document_id());
         let view_rect = ui.clip_rect();
         if floating_comments(app) {
             // Its own layer, so presses on the card never reach the canvas under it.
@@ -1766,8 +1898,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         // Content controls: the frame of the one the caret is in (all of them in Design Mode).
         crate::content_controls::paint(app, &painter, &t, &layout, &rects, geo.scale);
         paint_read_aloud_highlight(app, &painter, &layout, &rects, &geo, &t);
-        // Caret.
-        let focused = resp.has_focus() || app.canvas.focused;
+        // Caret. A PDF is read-only: no caret and no IME candidate window over its pages.
+        let focused = !pdf_mode && (resp.has_focus() || app.canvas.focused);
         // After an automatic change the web's text agent starts afresh
         // (`keys::note_automatic_change`) — only there, because on X11 an interrupt recreates the
         // input context and fcitx drops later keys (#1169). A body replacement interrupts on every

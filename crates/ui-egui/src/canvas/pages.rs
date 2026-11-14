@@ -16,6 +16,9 @@ pub(super) fn view_key(app: &WordApp, dim_body: bool, hidden: Option<&Pos>, hint
     format!("{:?}{:?}{:?}", app.session.doc.settings.page_color, app.session.doc.settings.page_picture, app.session.doc.settings.watermark)
         .hash(&mut h);
     app.session.doc.media.len().hash(&mut h);
+    // A new document or a PDF view replaces every page texture: neither the layout fingerprint
+    // nor the view state alone would change enough to invalidate them.
+    (app.session.document_id(), app.session.pdf.is_some()).hash(&mut h);
     // A page drawn without a dragged object must not pass for the page with it: the drag starts
     // and ends change the key once each, so the page is rendered again then and only then.
     hidden.hash(&mut h);

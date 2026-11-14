@@ -247,6 +247,26 @@ fn open(s: &mut Session, v: &Value) -> CmdResult {
         s.push_ui_request(json!({"open": "openFile"}));
         return sel_result(s);
     };
+    // A PDF opens as a read-only view, not as a Document. Decide by extension or by the %PDF-
+    // signature in the bytes, then handle it before any document importer sees it. This also
+    // comes before the "already open" shortcut: a PDF leaves a blank placeholder in the open
+    // documents, and activating that would show an empty document instead of the PDF view when
+    // the same file is opened again.
+    let data = p::str(v, "data").map(|d| super::insert::base64_decode(d).ok_or_else(|| CmdError::Params("bad base64".into()))).transpose()?;
+    let is_pdf = match &data {
+        Some(bytes) => !bytes.is_empty() && crate::io::is_pdf(path, Some(bytes)),
+        None => crate::io::is_pdf(path, None),
+    };
+    if is_pdf {
+        let bytes = match data {
+            Some(bytes) => bytes,
+            None => crate::io::read_pdf_path(std::path::Path::new(path)).map_err(CmdError::Failed)?,
+        };
+        let view = crate::io::open_pdf_bytes(bytes).map_err(CmdError::Failed)?;
+        let pages = view.page_count();
+        s.set_pdf_view(view, path);
+        return Ok(json!({"path": path, "format": "pdf", "readOnly": true, "pages": pages, "encrypted": false}));
+    }
     if p::str(v, "data").is_none()
         && let Some(id) = s.find_open(std::path::Path::new(path))
     {

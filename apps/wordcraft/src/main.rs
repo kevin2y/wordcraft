@@ -131,6 +131,8 @@ impl eframe::App for App {
     fn on_exit(&mut self) {
         print::finish_pending_jobs();
         self.0.session.finish_recovery();
+        // The file's last page and caret go out with the other preferences.
+        self.0.capture_view_position();
         save_prefs(&self.0);
         if let Some(key_file) = &self.2 {
             key_file.remove();
@@ -191,6 +193,8 @@ fn schedule_macos_terminate(app: &mut WordApp, key_file: Option<&control_server:
     // This path can bypass on_exit. Join the owned workers before termination and cleanup.
     print::finish_pending_jobs();
     app.session.finish_recovery();
+    // This path bypasses on_exit; take the last reading place before saving preferences.
+    app.capture_view_position();
     save_prefs(app);
     if let Some(key_file) = key_file {
         key_file.remove();

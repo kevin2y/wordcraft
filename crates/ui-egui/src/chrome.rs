@@ -427,8 +427,10 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                 // No document open (#1129): the app's name alone.
                 "WordCraft".to_string()
             } else {
+                // "PDF" is a format name, so it needs no translation.
+                let kind = if app.session.pdf.is_some() { " (PDF)" } else { "" };
                 format!(
-                    "{} — {}",
+                    "{}{kind} — {}",
                     crate::i18n::isolate(&app.title_stem()),
                     if app.session.dirty {
                         tl!("Edited")
@@ -741,7 +743,11 @@ pub fn status_bar(app: &mut WordApp, ui: &mut Ui) {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing = vec2(14.0, 0.0);
                     let l = app.session.layout();
-                    let page = if let Some(p) = app.canvas.viewed_page {
+                    let page = if let Some(p) = app.canvas.pdf_current_page.filter(|_| app.session.pdf.is_some()) {
+                        // A PDF has no caret: the page at the top of the viewport is the current
+                        // one, so link jumps and scrolling are reflected in the status bar.
+                        p.saturating_add(1).min(l.pages.len())
+                    } else if let Some(p) = app.canvas.viewed_page {
                         // The page in view (#3880), as the scrollbar's tip names it.
                         p.min(l.pages.len().saturating_sub(1)) + 1
                     } else if app.session.selects_whole_story() {

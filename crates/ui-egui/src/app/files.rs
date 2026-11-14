@@ -196,6 +196,9 @@ impl WordApp {
     /// The window's close button (or the system) asked to quit. Returns true to let the window
     /// close; with unsaved changes it asks first and returns false.
     pub fn close_requested(&mut self) -> bool {
+        // The desktop host writes its preferences on exit; a quit path can bypass `on_exit`,
+        // so take the last reading place here as well.
+        self.capture_view_position();
         if self.printing.busy() {
             self.status(tl!("Wait for the print job to finish submitting before closing."));
             return false;

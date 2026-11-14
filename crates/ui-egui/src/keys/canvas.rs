@@ -101,9 +101,15 @@ fn read_mode_events(app: &mut WordApp, ctx: &egui::Context, events: &[egui::Even
                 crate::canvas::turn_read_page(app, -1.0)
             }
             egui::Event::Copy => {
-                let selected = app.session.selected_text();
-                if !selected.is_empty() {
-                    ctx.copy_text(selected);
+                // A read-only PDF has no editable document behind it: copy its text-layer
+                // selection instead of the blank placeholder's empty string.
+                if let Some(text) = crate::canvas::pdf_selected_text(app) {
+                    crate::system_clipboard::put(app, ctx, &text, "", "", "");
+                } else {
+                    let selected = app.session.selected_text();
+                    if !selected.is_empty() {
+                        ctx.copy_text(selected);
+                    }
                 }
             }
             _ => {}
@@ -518,9 +524,15 @@ fn handle_event(app: &mut WordApp, ctx: &egui::Context, e: egui::Event) {
             let _ = app.run(id, json!({"text": t}));
         }
         egui::Event::Copy | egui::Event::Cut => {
-            let id = if matches!(e, egui::Event::Cut) { "edit.cut" } else { "edit.copy" };
-            // `run` puts the copied text on the system clipboard itself.
-            let _ = app.run(id, json!({}));
+            // A PDF has no editable document behind it: `edit.copy` would return an empty
+            // string from the blank placeholder. Copy the PDF text layer selection instead.
+            if let Some(text) = crate::canvas::pdf_selected_text(app) {
+                crate::system_clipboard::put(app, ctx, &text, "", "", "");
+            } else {
+                let id = if matches!(e, egui::Event::Cut) { "edit.cut" } else { "edit.copy" };
+                // `run` puts the copied text on the system clipboard itself.
+                let _ = app.run(id, json!({}));
+            }
         }
         egui::Event::Key { key, pressed: true, modifiers, .. } => key_press(app, ctx, key, modifiers),
         _ => {}

@@ -5,8 +5,12 @@ use super::view::DRAFT_WIDTH;
 use super::{Arc, DocLayout, Document, LayoutCache, LayoutOptions, Session, StoryRef, Value, ViewMode};
 
 impl Session {
-    /// The current layout (recomputed when the document or view changed).
+    /// The current layout (recomputed when the document or view changed). A PDF view supplies
+    /// one empty page per sheet, so the canvas places PDF bitmaps with its ordinary geometry.
     pub fn layout(&mut self) -> Arc<DocLayout> {
+        if let Some(pdf) = &self.pdf {
+            return pdf.layout();
+        }
         let typing = self.typing_word();
         self.layout_with(typing)
     }

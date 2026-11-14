@@ -137,6 +137,7 @@ impl WordApp {
             system_animations: None,
             applied_animations: None,
             frame_ms: 0.0,
+            last_view_capture: 0.0,
             quit_requested: false,
             autosave: true,
             zotero: zotero::ZoteroLink::default(),
@@ -390,7 +391,13 @@ impl WordApp {
         read_aloud::poll(self, ctx);
         self.clear_stale_change_picture();
         let _ = self.poll_file_dialog();
-        self.autosave_tick(now_ms());
+        let now = now_ms();
+        // Scrolling and typing change the reading place without running a command. Capture it
+        // about once a second; document switches and window closing capture immediately.
+        if now - self.last_view_capture >= crate::view_position::VIEW_CAPTURE_MS {
+            self.capture_view_position();
+        }
+        self.autosave_tick(now);
         if self.autosaves() && self.session.dirty {
             ctx.request_repaint_after(std::time::Duration::from_millis(1000));
         }

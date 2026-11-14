@@ -254,6 +254,7 @@ impl WordApp {
             info_editing,
             shown_document,
             clipboard_published: _,
+            last_view_capture: _,
         } = self;
         let UiState {
             // App-wide: preferences, recent lists, and the settings the session owns while
@@ -261,6 +262,7 @@ impl WordApp {
             ribbon_collapsed: _,
             quick_access_toolbar: _,
             recent: _,
+            positions: _,
             recent_symbols: _,
             date_time_format: _,
             date_time_language: _,

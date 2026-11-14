@@ -151,6 +151,9 @@ impl WordApp {
         if let Some(url) = self.canvas.open_url.take() {
             ctx.open_url(egui::OpenUrl::new_tab(url));
         }
+        if let Some(text) = self.canvas.pdf_copy_text.take() {
+            crate::system_clipboard::put(self, ctx, &text, "", "", "");
+        }
     }
 
     /// Keep the window title and full-screen state in sync, then record this frame's time.

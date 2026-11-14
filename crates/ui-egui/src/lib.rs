@@ -77,6 +77,7 @@ pub mod table_resize;
 pub mod table_ruler;
 pub mod theme;
 pub mod updates_ui;
+mod view_position;
 pub mod widgets;
 pub mod window_close;
 pub mod window_geometry;
@@ -105,6 +106,7 @@ pub use dialogs::dialogs_smart_art;
 pub use dialogs::dialogs_table_style;
 pub use dialogs::dialogs_templates;
 pub use file_dialogs::{FileDialogAnswer, FileDialogRequest, open_filters};
+pub use view_position::ViewPosition;
 
 mod app;
 mod clock;
@@ -293,6 +295,10 @@ pub struct UiState {
     /// Ribbon › Quick Access Toolbar) brings it back. Kept between runs.
     pub quick_access_toolbar: bool,
     pub recent: Vec<String>,
+    /// Reading positions, keyed by the file's path (its name on the web, where files arrive as
+    /// bytes). Kept with the other preferences so a file opened again — in this run or the
+    /// next — returns to the page and caret the reader left it at.
+    pub positions: std::collections::BTreeMap<String, ViewPosition>,
     /// Symbols inserted from the Symbol dialog, most recent first (#321).
     pub recent_symbols: Vec<dialogs_insert::RecentSymbol>,
     /// Saved choices in Insert > Date & Time: format picture.
@@ -462,6 +468,7 @@ impl Default for UiState {
             ribbon_collapsed: false,
             quick_access_toolbar: true,
             recent: Vec::new(),
+            positions: std::collections::BTreeMap::new(),
             recent_symbols: Vec::new(),
             date_time_format: String::new(),
             date_time_language: String::new(),
@@ -528,7 +535,9 @@ impl UiState {
             return None;
         }
         migrate_units(&mut v);
-        Some(options::lenient(&v))
+        let mut ui: UiState = options::lenient(&v);
+        view_position::sanitize_positions(&mut ui.positions);
+        Some(ui)
     }
 
     /// How many recent documents to list.
@@ -748,6 +757,9 @@ pub struct WordApp {
     /// The document's [`StatusCounts`] and the key they were computed for; see [`WordApp::cached_status_counts`].
     pub status_counts: (u64, StatusCounts),
     last_autosave: f64,
+    /// Last time the open file's reading position was captured, throttled so the web host
+    /// doesn't write its preferences on every frame of a scroll.
+    last_view_capture: f64,
     /// The tab shown before the Equation tab came up (restored when editing ends).
     pub(crate) equation_prev_tab: Option<String>,
     /// SmartArt Text Pane: the item last focused (Promote, Demote and Add Shape act on it) and
@@ -831,3 +843,6 @@ mod tests_dialog_tabs;
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod tests_view_position;

@@ -17,6 +17,7 @@ pub mod keymap;
 pub(crate) mod locale;
 pub mod math_gallery;
 pub mod packs;
+pub mod pdf_view;
 pub(crate) mod prefs;
 pub mod print;
 pub mod recovery;
@@ -34,6 +35,7 @@ use serde_json::Value;
 
 pub use io::Password;
 pub use keymap::KeyMap;
+pub use pdf_view::{LinkTarget, PdfChar, PdfLink, PdfRect, PdfView};
 pub use ribbon::RibbonLayout;
 pub use session::{
     CellRange, ColumnBlock, DocInfo, DocState, EditSnapshot, FindState, MathEdit, Prefs, Selection, Session, StylesPaneDock, UNDO_LIST_MAX,

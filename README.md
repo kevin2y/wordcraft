@@ -97,7 +97,9 @@ Every screenshot below is WordCraft itself, rendered offscreen by its own UI tes
   Tab demotes it, Ctrl/⌘+B bolds the word under the caret, the Styles gallery previews styles live,
   F4 repeats, F7 checks spelling, F8 extends the selection.
 - **Your files.** Opens and saves .docx (OOXML), and also .odt, .rtf, .html, .md, .tex (LaTeX), .txt; opens legacy 97-2003 .doc; exports PDF
-  with real, selectable text, links and bookmarks.
+  with real, selectable text, links and bookmarks. PDFs also open as a read-only page view (rasterised
+  pages, clickable links, selectable text); WordCraft remembers the page and caret you left each file
+  at and returns there when you reopen it, even after a restart.
 - **Fast.** Paragraph layout is cached, so typing in a 188-page document re-lays it out in about
   1.4 ms; pages render on demand.
 - **Everywhere.** One Rust codebase for macOS, Windows, Linux, BSD and the web. No Electron, no
@@ -125,7 +127,7 @@ Every screenshot below is WordCraft itself, rendered offscreen by its own UI tes
 | **Review** | Spelling and grammar with suggestions (English and Polish, by each run's language), thesaurus, word count, comments in margin balloons or a pane, track changes, accept/reject, compare documents, restrict editing, accessibility checker, document inspector |
 | **Mailings** | Mail merge from CSV, merge fields, address block, greeting line, rules, preview, finish to a document; envelopes and labels |
 | **View** | Print layout, web layout, draft, read mode, focus, zoom, one/multiple pages, page width, Navigation pane, rulers, gridlines, dark mode; interface in English, 简体中文, 繁體中文, 日本語, Português (Brasil), Español, Українська, Српски / Srpski, Eesti, Türkçe, Русский, Italiano, Deutsch, Polski, Čeština, Magyar, Français, Български, Tiếng Việt, 한국어, Svenska, Hrvatski, Nederlands, Dansk, Română, العربية (mirrored) or Slovenščina (follows the system language by default) |
-| **Files** | .docx read/write, legacy 97-2003 .doc import, PDF export, .odt, .rtf, .html, .md, .tex, .txt import/export, page images |
+| **Files** | .docx read/write, legacy 97-2003 .doc import, PDF export, read-only PDF page view, .odt, .rtf, .html, .md, .tex, .txt import/export, page images; reopens at the last page and caret |
 
 The honest picture, area by area, is in [ROADMAP.md](ROADMAP.md), the
 [parity assessment](docs/target-app-parity.md) and the generated

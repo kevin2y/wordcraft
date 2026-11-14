@@ -191,6 +191,11 @@ fn title(path: Option<&FsPath>, file_name: Option<&str>, doc: &Document, untitle
 impl Session {
     /// Swap the active document's state with `d`'s: `d` then holds the document that was active.
     fn swap_doc(&mut self, d: &mut DocState) {
+        // A read-only PDF view belongs to the document that opened it. Parking that document for
+        // another one (New, a file opened beside it, a window switch, Close) leaves a real
+        // document active: drop the view, or the read-only command gate stays on and PDF pages
+        // are painted over the new document's layout.
+        self.pdf = None;
         crate::cmd::md_source::apply(self);
         use std::mem::swap;
         // Every field is listed, so a new one doesn't build until someone decides whether each
@@ -203,6 +208,10 @@ impl Session {
             view: _,
             pending: _,
             path: _,
+            // A read-only PDF view belongs to the window that opened it, not to a DocState's
+            // undoable document history; `swap_doc` and `set_document` drop it when the active
+            // document is parked or replaced.
+            pdf: _,
             file_name: _,
             dirty: _,
             pending_move: _,

@@ -4,6 +4,16 @@ use super::snapshot_types::RunSnapshot;
 use super::{CharProps, CmdError, Document, Fragment, ImeEditOutcome, Pos, Session, StoryRef, Value, document_id_mark};
 use crate::CommandSpec;
 
+/// A PDF is a view, never a document. Editing it, or writing the blank document behind it out
+/// under the PDF's name, is refused; navigating, changing the view, Close and Open still work.
+fn pdf_blocks(id: &str, mutates: bool) -> bool {
+    id.starts_with("file.save")
+        || id.starts_with("file.export")
+        || id.starts_with("file.print")
+        || id.starts_with("file.encrypt")
+        || (mutates && !matches!(id, "file.close" | "file.new" | "file.open"))
+}
+
 struct SuccessContext<'a> {
     id: &'a str,
     spec: &'a CommandSpec,
@@ -100,6 +110,9 @@ impl Session {
             || (id == "text.insert" && ime_text_join.as_ref().is_some_and(|sel| sel == &self.sel));
         if let Some(why) = (spec.enabled)(self) {
             return Err(CmdError::Disabled(format!("{id}: {why}")));
+        }
+        if self.pdf.is_some() && pdf_blocks(id, spec.mutates) {
+            return Err(CmdError::Disabled(format!("{id}: a PDF is open as a read-only view")));
         }
         // Restrict Editing: refused outright, or allowed as long as it only edits the exceptions.
         let guard = if spec.mutates { crate::cmd::protect::check_before(self, id, params)? } else { false };

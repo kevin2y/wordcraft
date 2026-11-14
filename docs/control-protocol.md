@@ -1,6 +1,6 @@
 # Control protocol
 
-> **Last updated:** 2026-11-09 · #6159: refuse ui.screenshot on secondary document windows and support root window selection with view.switchWindows.
+> **Last updated:** 2026-11-14 · read-only PDF commands (`ui.pdf.*`) and reading-position restore (`ui.viewPosition`); #6159: refuse ui.screenshot on secondary document windows and support root window selection with view.switchWindows.
 
 Start the app with a control port: `wordcraft --control 7981` (or `WORDCRAFT_CONTROL_PORT=7981`).
 A missing or invalid port after `--control` (not 1–65535) prints an error and exits with status 2.
@@ -100,6 +100,8 @@ let apps move windows, so there Arrange All and Side by Side only resize.
 | `ui.parity` | — | feature-catalog parity |
 | `ui.resize` | `width`, `height` | asks for that window content size in points; sizes that aren't positive and finite are refused, the rest are clamped to the app's minimum (760 × 480) and to the largest surface the GPU can draw (at most 16384; that limit wins over the minimum), and the reply's `width` and `height` are the size asked for |
 | `ui.focus` / `app.quit` | | window control |
+| `ui.pdf.goto`, `ui.pdf.select`, `ui.pdf.copy`, `ui.pdf.links` (commands) | see [Read-only PDF commands](#read-only-pdf-commands) | navigate, select, copy and read a PDF's links |
+| `ui.viewPosition` (command) | `clear?` | read or forget the remembered reading positions (see [Reading position](#reading-position)) |
 
 Any other method name is treated as a command id: `{"method": "format.bold"}` works.
 
@@ -119,6 +121,48 @@ language… or Refresh buttons. An install or a refresh runs in the background
 (`"started": true`); `proof.packs` reports its progress, then the result.
 `ui.dialog {"name": "languageData"}` opens About › Language data.
 
+### Read-only PDF commands
+
+UI commands, run through `engine.execute` while a PDF is open. Character indices and `page` in
+`ui.pdf.select` and `ui.pdf.links` are 0-based; `ui.pdf.goto` takes a 1-based page number.
+Rectangles and `top` are in page points with a top-left origin.
+
+| Command | Params | Result |
+|---|---|---|
+| `ui.pdf.links` | `page` (0-based) | `{page, links: [{rect: [x0,y0,x1,y1], target: {page, top?} or {uri}}]}` |
+| `ui.pdf.goto` | `page` (1-based), `top?` (points from the page's top) | `{page, top}`, clamped to the document |
+| `ui.pdf.select` | `from`, `to` = `[page, charIndex]` | `{from, to}`; reversed ranges are normalised |
+| `ui.pdf.copy` | — | `{text}`: the selected text, also put on the system clipboard |
+
+A real click on a link goes through the canvas, so `ui.clickText` works when that page is on
+screen; dragging over the text layer selects. Ctrl/⌘+C, the right-click menu's Copy, the ribbon's
+Copy and a scripted `edit.copy` all read that same selection (`edit.copy` returns `{text}` here
+instead of the blank document behind the view). Destinations come from
+`/Dest`, `/A /GoTo` (including named destinations in `/Dests` or the `/Names` name tree) and
+`/A /URI`; external links reach the host only when they are web or mail URLs. See
+`docs/file-format-parity.md` for what is not supported.
+
+### Reading position
+
+WordCraft keeps the page at the top of the window and, for an editable document, the caret,
+for each file it has opened. Opening the file again — with `file.open`, from Recent, or as a
+command-line argument on the next launch — returns to that place. PDFs keep just the page and
+the distance into it, page points from the page's top edge. The positions live in `ui.json`
+(the browser's `localStorage` on the web) with the other preferences; a file whose paragraph or
+page count changed since is opened at its beginning instead.
+
+`ui.viewPosition` (through `engine.execute`) reads what is currently remembered, and
+`{"clear": true}` forgets every file:
+
+| Params | Result |
+|---|---|
+| — | `{path, saved: {page, top, caret?, fingerprint?} or null, count}` |
+| `clear: true` | `{path, saved: null, count: 0}` |
+
+`page` is 0-based; `top` is rounded to 8 pt. The canvas applies the restore on its first frame
+with the new file's page rects, so a jump requested in the same frame by `ui.pdf.goto` still
+wins.
+
 ### Open documents
 
 Several documents can be open at once. Each has an id, a whole number that stays the same while
@@ -130,7 +174,9 @@ window); in the browser, the one the window shows. Commands work on it unless to
 - `file.new` opens another document in a new window, focused, and makes it active. `file.open`
   does the same with a file; it replaces a blank document nobody has used yet in that document's
   window, and a file that is already open becomes active again and its window comes to the front
-  (`"alreadyOpen": true`). Its result carries the document's `id`.
+  (`"alreadyOpen": true`). Its result carries the document's `id`. A PDF is the exception: it is
+  a read-only view, so opening one always loads its pages again instead of reactivating the blank
+  placeholder left behind in the open documents.
 - `view.switchWindows` lists the open documents (`{"documents": [{"id", "title", "path",
   "dirty", "active"}]}`); with `{"id": n}` it makes that document active and brings its window to
   the front. With `{"window": key}` it selects that window directly and brings it to the front.

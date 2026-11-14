@@ -12,6 +12,9 @@ impl WordApp {
     /// preferences.
     pub fn prefs(&self) -> UiState {
         let mut ui = self.ui.clone();
+        // Reading positions travel with the other preferences; keep the saved copy clean even
+        // when a position was recorded by a headless run that never read `ui.json`.
+        crate::view_position::sanitize_positions(&mut ui.positions);
         ui.author = Some(self.session.author.clone());
         ui.initials = self.session.initials.clone();
         ui.dictionary = wordcraft_engine::proof::user_dictionary();
@@ -31,6 +34,9 @@ impl WordApp {
     /// Restore preferences saved by [`WordApp::prefs`].
     pub fn apply_prefs(&mut self, ui: UiState) {
         self.ui = ui;
+        // `apply_prefs` is also reached straight from a host or the control channel, which may
+        // not have gone through `UiState::from_json`; filter the positions all the same.
+        crate::view_position::sanitize_positions(&mut self.ui.positions);
         self.ui.backstage = false;
         // Word opens on Home every launch, so the tab `ui.json` holds is not restored. Going File
         // and back to the editor within the run still returns to the tab that was showing.

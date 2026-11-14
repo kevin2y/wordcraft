@@ -54,6 +54,9 @@ pub struct Session {
     /// Last highlighter choice for the shortcut; palette state, outside document undo.
     pub(crate) last_highlight: wordcraft_doc::props::Highlight,
     pub path: Option<std::path::PathBuf>,
+    /// A PDF opened for reading: shown instead of the document, never part of it. Shared with the
+    /// UI so a page raster can be produced without borrowing the whole session.
+    pub pdf: Option<Arc<crate::PdfView>>,
     /// Name given to a document not saved yet (File › Info › Rename): what Save suggests. A file
     /// name, not document metadata, so it is not part of the document or its undo history.
     pub file_name: Option<String>,

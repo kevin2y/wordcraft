@@ -168,7 +168,14 @@ The craft-pdf writer and Krilla 0.8.2 backend are pinned to storytold/craft-libs
 b926b5c03e256c86ca10934f58d03f628810b5b7. The backend retains its MIT OR Apache-2.0 licensing
 and upstream bundled material; see that revision's licenses/pdf-writer/ and ATTRIBUTION.md.
 The backend patch prevents finalization during an unwind and rejects a writer after failed
-cleanup. WordCraft enables only writing; PDF import and its image decoders are not enabled.
+cleanup. The writer enables only writing; its PDF import and image decoders are not enabled.
+
+Read-only PDF viewing uses the hayro crate family (Apache-2.0 OR MIT, pure Rust, fetched from
+crates.io): hayro-syntax parses the file and hayro rasterises pages through vello_cpu. Link
+annotations and the selectable text layer are read through the same crates' public object model
+and interpreter `Device` API, so no separate PDF library is linked. No native PDFium, Poppler or
+MuPDF library is bundled or linked. Encrypted PDFs, transparency groups and knockout groups are
+not supported by that renderer.
 
 No Microsoft, Adobe, Avid or Autodesk icons, images, templates or artwork are included.
 
