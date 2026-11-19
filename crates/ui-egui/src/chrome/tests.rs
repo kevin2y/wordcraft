@@ -8,10 +8,16 @@ fn ctx() -> egui::Context {
     ctx
 }
 
+/// Draws both header bands: the document tabs and the ribbon's command strip, where AutoSave and
+/// the Quick Access Toolbar now live.
 fn frame(ctx: &egui::Context, n: &mut u32, events: Vec<egui::Event>, a: &mut WordApp) {
     *n += 1;
     let input = egui::RawInput { time: Some(f64::from(*n) / 60.0), predicted_dt: 1.0 / 60.0, events, ..Default::default() };
-    ctx.run_ui(input, |ui| title_bar(a, ui)).drop_without_applying_deltas();
+    ctx.run_ui(input, |ui| {
+        title_bar(a, ui);
+        crate::ribbon::show(a, ui);
+    })
+    .drop_without_applying_deltas();
 }
 
 fn click(ctx: &egui::Context, n: &mut u32, pos: egui::Pos2, a: &mut WordApp) {
@@ -303,10 +309,10 @@ fn mac_title_bar_follows_the_measured_lights() {
 }
 
 /// #1945: Hide Quick Access Toolbar, the last item of the toolbar's menu, takes the toolbar's
-/// buttons and its … button out of the title bar, which keeps its title; the command brings
-/// them back.
+/// buttons and its … button out of the command strip, which keeps the ribbon tabs; the command
+/// brings them back.
 #[test]
-fn hide_quick_access_toolbar_takes_the_toolbar_out_of_the_title_bar() {
+fn hide_quick_access_toolbar_takes_the_toolbar_out_of_the_command_strip() {
     use egui_kittest::kittest::Queryable;
     let a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
@@ -319,6 +325,7 @@ fn hide_quick_access_toolbar_takes_the_toolbar_out_of_the_title_bar() {
                 return;
             }
             title_bar(app, ui);
+            crate::ribbon::show(app, ui);
         },
         a,
     );
@@ -342,7 +349,7 @@ fn hide_quick_access_toolbar_takes_the_toolbar_out_of_the_title_bar() {
         assert!(!drawn(&h, id), "{id} is gone");
     }
     assert!(h.ctx.read_response(qat_menu_button_id()).is_none(), "so is the … button");
-    assert!(h.query_by_label_contains("Not saved").is_some(), "the title is still drawn");
+    assert!(h.query_by_label_contains("Not saved").is_some(), "the document tab is still drawn");
     h.state_mut().run("ui.quickAccessToolbar", json!({"value": true})).unwrap();
     h.run_steps(2);
     for id in ["file.save", "edit.undo", "edit.redo"] {
@@ -392,6 +399,7 @@ fn autosave_harness() -> (egui_kittest::Harness<'static, WordApp>, std::path::Pa
                 return;
             }
             title_bar(app, ui);
+            crate::ribbon::show(app, ui);
         },
         a,
     );
@@ -518,16 +526,12 @@ fn the_autosave_knob_sits_right_when_on_and_mirrors_right_to_left() {
     assert_eq!(autosave_knob_x(true, false, track), 122.0, "right to left, off: right");
 }
 
-/// #5886: in a narrow window the title bar's search box gives up width first, then Discord its
-/// label, then the search box its text; a wide window keeps them as they were.
+/// The search box lives in Full Screen's command bar, not the title bar: its width is fixed now
+/// that the title bar has no controls to yield room to.
 #[test]
-fn the_title_bar_controls_fit_a_narrow_window() {
-    let fit = |room| TitleBarFit::new(room, true, 26.0);
-    assert_eq!(fit(1000.0), TitleBarFit { search: 260.0, discord_label: true });
-    assert_eq!(fit(300.0), TitleBarFit { search: 208.0, discord_label: true });
-    assert_eq!(fit(200.0), TitleBarFit { search: 170.0, discord_label: false });
-    assert_eq!(fit(120.0), TitleBarFit { search: 26.0, discord_label: false });
-    assert_eq!(TitleBarFit::new(200.0, false, 26.0).search, 200.0, "without Discord the search box has its room");
+fn the_command_bar_search_keeps_its_width() {
+    assert_eq!(TitleBarFit::SEARCH, 260.0);
+    assert_eq!(TitleBarFit::SEARCH_TEXT, 160.0);
 }
 
 /// The labelled controls drawn by `draw` in a window `width` wide at `scale`: (label, left, right).
@@ -579,20 +583,22 @@ fn painted_texts(a: &mut WordApp, width: f32, draw: fn(&mut WordApp, &mut Ui)) -
     texts
 }
 
-/// #5886: down to the new minimum width the title bar's controls don't overlap: the search box
-/// narrows instead of covering the Quick Access Toolbar. Parametrized at the exact 600 pt minimum,
-/// half-screen split widths (640 pt at 150% scale, 683 pt), and across 1.0x and 1.5x scale factors.
+/// Down to the minimum width the document tab and its controls don't overlap or run off the
+/// window: the tab's name is shortened to make room. Parametrized across the 600 pt minimum,
+/// half-screen split widths and both scale factors.
 #[test]
-fn title_bar_controls_never_overlap_in_a_narrow_window() {
+fn document_tab_never_overlaps_in_a_narrow_window() {
     for scale in [1.0, 1.5] {
         for width in [crate::window_geometry::MIN_SIZE.x, 640.0, 680.0, 760.0, 1440.0] {
             let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
-            a.ui.show_discord = true;
+            let texts = painted_texts(&mut a, width, title_bar);
+            assert!(texts.iter().any(|t| t.contains("Document1")), "{scale}x {width}: {texts:?}");
             let nodes = labelled_scaled(&mut a, width, scale, title_bar);
-            assert!(nodes.iter().any(|(l, ..)| l == "Search commands and help"), "{scale}x {width}: {nodes:?}");
-            for (i, (la, a0, a1)) in nodes.iter().enumerate() {
+            let controls: Vec<_> = nodes.iter().filter(|(l, ..)| l == "Close Document" || l == "New Document").collect();
+            assert_eq!(controls.len(), 2, "{scale}x {width}: {nodes:?}");
+            for (i, (la, a0, a1)) in controls.iter().enumerate() {
                 assert!(*a1 <= f64::from(width) + 0.5, "{scale}x {width}: {la} runs off the window");
-                for (lb, b0, b1) in nodes.iter().skip(i + 1) {
+                for (lb, b0, b1) in controls.iter().skip(i + 1) {
                     assert!(a1 <= b0 || b1 <= a0, "{scale}x {width}: {la} ({a0}–{a1}) overlaps {lb} ({b0}–{b1})");
                 }
             }
@@ -600,32 +606,24 @@ fn title_bar_controls_never_overlap_in_a_narrow_window() {
     }
 }
 
-/// #5886 (review): when search is active in the title bar at narrow widths down to the minimum
-/// width (and at icon-only search widths), the active text editor stays within the fitted width
-/// without expanding or overlapping surrounding controls (Quick Access Toolbar or Discord).
+/// A long document name is clipped to the tab, leaving the close × and the new-tab button their
+/// room even at the minimum width.
 #[test]
-fn title_bar_controls_never_overlap_when_search_is_active_in_a_narrow_window() {
+fn a_long_document_name_keeps_the_tab_controls_room() {
     for scale in [1.0f32, 1.5f32] {
-        // Test narrow icon-only widths (e.g. 400 pt where TitleBarFit returns control_h) as well
-        // as the 600 pt split minimum and wider split widths.
-        for width in [400.0, 450.0, crate::window_geometry::MIN_SIZE.x, 640.0, 680.0, 760.0, 1440.0] {
+        for width in [400.0, crate::window_geometry::MIN_SIZE.x, 640.0, 1440.0] {
             let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
-            a.ui.show_discord = true;
+            a.run("file.rename", json!({"name": "Notes ".repeat(25)})).unwrap();
             let ctx = ctx();
             if (scale - 1.0).abs() > 0.001 {
                 ctx.set_zoom_factor(scale);
             }
             ctx.enable_accesskit();
-            a.ctx = Some(ctx.clone());
             let input = egui::RawInput { screen_rect: Some(egui::Rect::from_min_size(egui::Pos2::ZERO, vec2(width, 700.0))), ..Default::default() };
-            // Frame 1: draw title bar to record search box presence.
             let mut out1 = ctx.run_ui(input.clone(), |ui| title_bar(&mut a, ui));
             out1.textures_delta.clear();
-            assert!(open_title_search(&mut a), "search opens in the title bar box");
-            // Frame 2: draw title bar with search active.
             let mut out = ctx.run_ui(input, |ui| title_bar(&mut a, ui));
             out.textures_delta.clear();
-            assert!(title_search_open(&a, &ctx), "search is active in frame 2");
             let update = out.platform_output.accesskit_update.take().unwrap();
             let nodes: Vec<(String, f64, f64)> = update
                 .nodes
@@ -634,11 +632,12 @@ fn title_bar_controls_never_overlap_when_search_is_active_in_a_narrow_window() {
                 .filter(|(_, b)| b.width() > 0.0)
                 .map(|(l, b)| (l, b.x0, b.x1))
                 .collect();
-            assert!(nodes.iter().any(|(l, ..)| l == "Search commands and help"), "{scale}x {width}: {nodes:?}");
-            for (i, (la, a0, a1)) in nodes.iter().enumerate() {
+            let controls: Vec<_> = nodes.iter().filter(|(l, ..)| l == "Close Document" || l == "New Document").collect();
+            assert_eq!(controls.len(), 2, "{scale}x {width}: {nodes:?}");
+            for (i, (la, a0, a1)) in controls.iter().enumerate() {
                 assert!(*a1 <= f64::from(width) + 0.5, "{scale}x {width}: {la} runs off the window");
-                for (lb, b0, b1) in nodes.iter().skip(i + 1) {
-                    assert!(a1 <= b0 || b1 <= a0, "{scale}x {width}: active search {la} ({a0}–{a1}) overlaps {lb} ({b0}–{b1})");
+                for (lb, b0, b1) in controls.iter().skip(i + 1) {
+                    assert!(a1 <= b0 || b1 <= a0, "{scale}x {width}: {la} ({a0}–{a1}) overlaps {lb} ({b0}–{b1})");
                 }
             }
         }

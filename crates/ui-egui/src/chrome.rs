@@ -64,7 +64,7 @@ pub(crate) fn qat_enabled(app: &WordApp, id: &str) -> bool {
 
 /// The Quick Access Toolbar (#379): the user's commands (Save, Undo, Redo until customized), each
 /// with a right-click menu, then the menu button that customizes it (#376).
-fn quick_access(ui: &mut Ui, app: &mut WordApp) {
+pub(crate) fn quick_access(ui: &mut Ui, app: &mut WordApp) {
     let ids: Vec<String> = app.session.ribbon.qat().into_iter().map(str::to_string).collect();
     for (index, id) in ids.iter().enumerate() {
         let id = id.as_str();
@@ -285,6 +285,41 @@ fn autosave_knob_x(rtl: bool, on: bool, r: Rect) -> f32 {
     crate::rtl::lead_x(rtl != on, r, 8.0)
 }
 
+/// The AutoSave switch. The label is part of the switch (#3370): clicking either toggles it.
+/// Drawn on the ribbon's command strip beside the Quick Access Toolbar.
+pub(crate) fn autosave_switch(ui: &mut Ui, app: &mut WordApp) {
+    let t = Tokens::get(ui.ctx());
+    let block = app.autosave_block();
+    let on = app.autosaves();
+    let color = if block.is_some() { t.text_dim.gamma_multiply(0.6) } else { t.text_dim };
+    let text =
+        ui.add(egui::Label::new(egui::RichText::new(tl!("AutoSave")).font(regular(11.5)).color(color)).selectable(false).sense(Sense::click()));
+    let (r, resp) = ui.allocate_exact_size(vec2(30.0, 16.0), Sense::click());
+    let (fill, stroke, knob_fill) = match (&block, on) {
+        (Some(_), _) => (t.input.gamma_multiply(0.5), t.border.gamma_multiply(0.7), t.text_dim.gamma_multiply(0.45)),
+        (None, true) => (t.accent, t.accent, t.on_accent),
+        (None, false) => (t.input, t.border_strong, t.text_dim),
+    };
+    ui.painter().rect(r, 8.0, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
+    let knob = autosave_knob_x(crate::rtl::on(), on, r);
+    ui.painter().circle_filled(pos2(knob, r.center().y), 5.0, knob_fill);
+    let tip = block.as_ref().map_or_else(|| tl!("AutoSave saves every change to the file (needs a saved document)").to_string(), |b| b.reason());
+    let text = text.on_hover_text(tip.as_str()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    let resp = resp.on_hover_text(tip.as_str()).on_hover_cursor(egui::CursorIcon::PointingHand);
+    if text.clicked() || resp.clicked() {
+        match block {
+            None => {
+                let _ = app.run("file.autosave", json!({}));
+            }
+            // AutoSave comes on once Save As has saved (maybe on a later frame, #94).
+            Some(b) if b.save_as_helps() => {
+                let _ = app.save_as(crate::file_dialogs::AfterSave::AutoSave);
+            }
+            Some(b) => app.status(b.reason()),
+        }
+    }
+}
+
 /// The `ctx.data` key for the part of the title bar that drags this document window.
 fn title_drag_id(ctx: &egui::Context) -> egui::Id {
     egui::Id::unique(("title_drag_rect", ctx.viewport_id()))
@@ -303,8 +338,23 @@ pub(crate) fn title_drag_rect(ctx: &egui::Context) -> Option<Rect> {
     ctx.data(|d| d.get_temp::<(Rect, u64)>(key)).filter(|(_, p)| *p == pass).map(|(r, _)| r)
 }
 
-/// Draws the title bar with window dragging, AutoSave, quick access, account, community and search
-/// controls, and the centred clickable document title.
+/// Stable ids for the document-tab controls: interactions need the same id on the next frame.
+fn tab_id(ui: &Ui) -> egui::Id {
+    ui.scope_id().with("document_tab")
+}
+
+fn new_tab_id(ui: &Ui) -> egui::Id {
+    ui.scope_id().with("new_document_tab")
+}
+
+fn close_tab_id(ui: &Ui) -> egui::Id {
+    ui.scope_id().with("close_document_tab")
+}
+
+/// The title bar as a document tab strip (WPS style): one tab for the current document and a `+`
+/// for a new one, with the rest of the band free to drag the window. AutoSave, the Quick Access
+/// Toolbar and the ribbon's tabs share the band below it ([`crate::ribbon::show`]). Search, the
+/// account button and the community link live in Backstage and Full Screen's command bar instead.
 pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     // macOS: shorter, so the system's traffic lights are centred in it; the tallest controls
@@ -318,7 +368,7 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
         .frame(egui::Frame::NONE.fill(t.title_bar).inner_margin(egui::Margin { left, right: 10, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let full = ui.max_rect();
-            // Drag the window by the title bar (integrated title bar on macOS).
+            // Drag the window by the empty part of the tab strip (integrated title bar on macOS).
             let drag = ui.interact(full, ui.scope_id().with("title_drag"), Sense::click_and_drag());
             if drag.drag_started() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
@@ -331,188 +381,107 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                 let max = ui.ctx().input(|i| i.viewport().maximized.unwrap_or(false));
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!max));
             }
-            // The free stretch between the two clusters, for the centred title. Right to left the
-            // clusters swap sides: AutoSave and the Quick Access Toolbar start at the right.
-            let rtl = crate::rtl::on();
-            let mut qat_end = if rtl { full.max.x } else { full.min.x };
-            let mut right_start = if rtl { full.min.x } else { full.max.x };
             crate::rtl::root(ui, |ui| {
                 ui.horizontal_centered(|ui| {
-                    ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
-                    // AutoSave switch: greyed out, with the reason as its tooltip, when AutoSave can't
-                    // cover the document (#196, #176); clicking it then offers Save As where that helps.
-                    let block = app.autosave_block();
-                    let on = app.autosaves();
-                    let color = if block.is_some() { t.text_dim.gamma_multiply(0.6) } else { t.text_dim };
-                    // The text is part of the switch (#3370): clicking it toggles AutoSave, and chrome
-                    // text is not document text to select (double-clicking it copied "AutoSave").
-                    let text = ui.add(
-                        egui::Label::new(egui::RichText::new(tl!("AutoSave")).font(regular(11.5)).color(color))
-                            .selectable(false)
-                            .sense(Sense::click()),
-                    );
-                    let (r, resp) = ui.allocate_exact_size(vec2(30.0, 16.0), Sense::click());
-                    let (fill, stroke, knob_fill) = match (&block, on) {
-                        (Some(_), _) => (t.input.gamma_multiply(0.5), t.border.gamma_multiply(0.7), t.text_dim.gamma_multiply(0.45)),
-                        (None, true) => (t.accent, t.accent, t.on_accent),
-                        (None, false) => (t.input, t.border_strong, t.text_dim),
-                    };
-                    ui.painter().rect(r, 8.0, fill, Stroke::new(1.0, stroke), egui::StrokeKind::Inside);
-                    let knob = autosave_knob_x(rtl, on, r);
-                    ui.painter().circle_filled(pos2(knob, r.center().y), 5.0, knob_fill);
-                    let tip = block
-                        .as_ref()
-                        .map_or_else(|| tl!("AutoSave saves every change to the file (needs a saved document)").to_string(), |b| b.reason());
-                    let text = text.on_hover_text(tip.as_str()).on_hover_cursor(egui::CursorIcon::PointingHand);
-                    let resp = resp.on_hover_text(tip.as_str()).on_hover_cursor(egui::CursorIcon::PointingHand);
-                    if text.clicked() || resp.clicked() {
-                        match block {
-                            None => {
-                                let _ = app.run("file.autosave", json!({}));
-                            }
-                            // AutoSave comes on once Save As has saved (maybe on a later frame, #94).
-                            Some(b) if b.save_as_helps() => {
-                                let _ = app.save_as(crate::file_dialogs::AfterSave::AutoSave);
-                            }
-                            Some(b) => app.status(b.reason()),
-                        }
+                    ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
+                    // macOS keeps the traffic-light/back-chevron zone clear. The strip still
+                    // drags the window; only the tab itself starts beyond that reserved space.
+                    if mac {
+                        ui.add_space(24.0);
                     }
-                    ui.add_space(8.0);
-                    // Hidden (#1945): neither the buttons nor the … menu; the title centres as before.
-                    if app.ui.quick_access_toolbar {
-                        quick_access(ui, app);
-                    }
-                    qat_end = if rtl { ui.min_rect().min.x } else { ui.min_rect().max.x };
-                    ui.with_layout(crate::rtl::far_side(ui, egui::Align::Center), |ui| {
-                        // The room left of the account button and its space, less the spaces between the
-                        // three controls and a gap from the Quick Access Toolbar.
-                        let room = ui.available_width() - control_h - 8.0 - 3.0 * ui.spacing().item_spacing.x - 8.0;
-                        let fit = TitleBarFit::new(room, app.ui.show_discord, control_h);
-                        // Account / community.
-                        let (r, resp) = ui.allocate_exact_size(vec2(control_h, control_h), Sense::click());
-                        ui.painter().circle_filled(r.center(), control_h / 2.0 - 1.0, t.accent);
-                        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Account")));
-                        let initials: String = app.session.user_initials().chars().take(2).collect();
-                        ui.painter().text(r.center(), Align2::CENTER_CENTER, initials, semibold(10.5), t.on_accent);
-                        if resp.on_hover_text(format!("{} — set your name in File › Options", app.session.author)).clicked() {
-                            let _ = app.run("ui.backstage", json!({"value": true, "page": "options", "pane": "general"}));
-                        }
-                        ui.add_space(8.0);
-                        if app.ui.show_discord {
-                            let (r, resp) = ui.allocate_exact_size(vec2(if fit.discord_label { 84.0 } else { 22.0 }, 22.0), Sense::click());
-                            ui.painter().rect_filled(r, 11.0, if resp.hovered() { t.accent_text } else { t.accent });
-                            let icon_x = if fit.discord_label { 13.0 } else { 11.0 };
-                            icons::paint(
-                                ui.painter(),
-                                Rect::from_center_size(pos2(crate::rtl::lead_x(rtl, r, icon_x), r.center().y), vec2(14.0, 14.0)),
-                                "discord",
-                                t.on_accent,
-                                t.on_accent,
-                            );
-                            if fit.discord_label {
-                                ui.painter().text(
-                                    pos2(crate::rtl::lead_x(rtl, r, 24.0), r.center().y),
-                                    crate::rtl::lead_center(rtl),
-                                    tl!("Discord"),
-                                    medium(11.5),
-                                    t.on_accent,
-                                );
-                            }
-                            resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Discord")));
-                            if resp.on_hover_text(tl!("Join the ArtCraft community on Discord")).clicked() {
-                                let _ = app.run("ui.discord", json!({}));
-                            }
-                            ui.add_space(8.0);
-                        }
-                        search_box(app, ui, control_h, fit.search);
-                        right_start = if rtl { ui.min_rect().max.x } else { ui.min_rect().min.x };
-                    });
-                })
-            });
-            let (qat_end, right_start) = if rtl { (right_start, qat_end) } else { (qat_end, right_start) };
-            // Centred title.
-            let title = if !app.has_document() {
-                // No document open (#1129): the app's name alone.
-                "WordCraft".to_string()
-            } else {
-                // "PDF" is a format name, so it needs no translation.
-                let kind = if app.session.pdf.is_some() { " (PDF)" } else { "" };
-                format!(
-                    "{}{kind} — {}",
-                    crate::i18n::isolate(&app.title_stem()),
-                    if app.session.dirty {
-                        tl!("Edited")
-                    } else if app.session.path.is_some() {
-                        tl!("Saved")
+                    // The one open document as a tab. Its accessible name keeps the document's
+                    // state, as the centred title did: tests and screen readers describe it in full.
+                    let title = if !app.has_document() {
+                        "WordCraft".to_string()
                     } else {
-                        tl!("Not saved")
+                        // "PDF" is a format name, so it needs no translation.
+                        let kind = if app.session.pdf.is_some() { " (PDF)" } else { "" };
+                        format!(
+                            "{}{kind} — {}",
+                            crate::i18n::isolate(&app.title_stem()),
+                            if app.session.dirty {
+                                tl!("Edited")
+                            } else if app.session.path.is_some() {
+                                tl!("Saved")
+                            } else {
+                                tl!("Not saved")
+                            }
+                        )
+                    };
+                    let font = TypeRung::Chrome.semibold();
+                    let track = TypeRung::Chrome.tracking();
+                    // Keep room for the tab's padding and close × (16 + 24), the 6 pt gap and the
+                    // 24 pt new-tab button: 70 pt in all, so the button never runs off the window.
+                    let room = (ui.available_width() - if app.has_document() { 70.0 } else { 40.0 }).max(0.0);
+                    let mut shown: String = title.chars().take(240).collect();
+                    if text_width(ui.painter(), &shown, &font, track, t.text) > room {
+                        while !shown.is_empty() && text_width(ui.painter(), &format!("{shown}…"), &font, track, t.text) > room {
+                            shown.pop();
+                        }
+                        shown.push('…');
                     }
-                )
-            };
-            let font = TypeRung::Chrome.semibold();
-            let track = TypeRung::Chrome.tracking();
-            let cx = full.center().x;
-            let available = 2.0 * (cx - qat_end - 10.0).min(right_start - 10.0 - cx);
-            let mut shown: String = title.chars().take(240).collect();
-            if text_width(ui.painter(), &shown, &font, track, t.text) > available {
-                while !shown.is_empty() && text_width(ui.painter(), &format!("{shown}…"), &font, track, t.text) > available {
-                    shown.pop();
-                }
-                shown.push('…');
-            }
-            let w = text_width(ui.painter(), &shown, &font, track, t.text);
-            if available > 24.0 {
-                let rect = Rect::from_center_size(pos2(cx, full.center().y), vec2(w + 8.0, control_h));
-                let response = ui.interact(rect, ui.scope_id().with("document_name"), Sense::click()).on_hover_text(tl!("Rename Document"));
-                response.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, &title));
-                if response.clicked() {
-                    let _ = app.run("file.rename", json!({}));
-                }
-
-                paint_text(
-                    ui.painter(),
-                    pos2(cx - w / 2.0, full.center().y - TypeRung::Chrome.line_height() / 2.0),
-                    Align2::LEFT_TOP,
-                    &shown,
-                    &font,
-                    track,
-                    t.text,
-                );
-            }
+                    let w = text_width(ui.painter(), &shown, &font, track, t.text).min(room);
+                    let tab_w = w + 16.0 + if app.has_document() { 24.0 } else { 0.0 };
+                    let (r, _) = ui.allocate_exact_size(vec2(tab_w, control_h + 6.0), Sense::hover());
+                    let resp = ui.interact(r, tab_id(ui), Sense::click());
+                    let active = app.has_document();
+                    ui.painter().rect_filled(r, 5.0, if active { t.ribbon } else { t.title_bar });
+                    paint_text(
+                        ui.painter(),
+                        pos2(r.min.x + 8.0, r.center().y - TypeRung::Chrome.line_height() / 2.0),
+                        Align2::LEFT_TOP,
+                        &shown,
+                        &font,
+                        track,
+                        t.text,
+                    );
+                    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, active, &title));
+                    if resp.on_hover_text(tl!("Rename Document")).clicked() && active {
+                        let _ = app.run("file.rename", json!({}));
+                    }
+                    if active {
+                        let close = Rect::from_center_size(pos2(r.max.x - 12.0, r.center().y), vec2(18.0, 18.0));
+                        let close_resp = ui.interact(close, close_tab_id(ui), Sense::click());
+                        // A distinct name keeps the tab control out of dialog "Close" lookups.
+                        close_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Close Document")));
+                        ui.painter().text(
+                            close.center(),
+                            Align2::CENTER_CENTER,
+                            "×",
+                            regular(15.0),
+                            if close_resp.hovered() { t.text } else { t.text_dim },
+                        );
+                        if close_resp.on_hover_text(tl!("Close Document")).clicked() {
+                            let _ = app.run("file.close", json!({}));
+                        }
+                    }
+                    ui.add_space(6.0);
+                    // A `+` opens a new document (a new native window while one window holds one
+                    // document); the tab strip will grow into it when documents share a window.
+                    let (r, _) = ui.allocate_exact_size(vec2(24.0, control_h), Sense::hover());
+                    let resp = ui.interact(r, new_tab_id(ui), Sense::click());
+                    if resp.hovered() {
+                        ui.painter().rect_filled(r, 4.0, t.hover);
+                    }
+                    ui.painter().text(r.center(), Align2::CENTER_CENTER, "+", medium(17.0), t.text_dim);
+                    resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("New Document")));
+                    if resp.on_hover_text(tl!("New Document")).clicked() {
+                        let _ = app.run("file.new", json!({}));
+                    }
+                });
+            });
         });
 }
 
-/// How the title bar's controls on the right fit a narrow window (#5886): the search box gives up
-/// width first, then Discord its label, then the search box its text.
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct TitleBarFit {
-    /// The search box's width; a square shows the magnifier alone.
-    pub(crate) search: f32,
-    /// Whether the Discord button has room for its label text.
-    pub(crate) discord_label: bool,
-}
+/// Widths for Search in Full Screen's command bar, which is the only place the box is drawn now
+/// that the title bar holds document tabs.
+pub(crate) struct TitleBarFit;
 
 impl TitleBarFit {
-    /// The search box's width when there is room for it.
+    /// The search box's width in the command bar.
     pub(crate) const SEARCH: f32 = 260.0;
     /// The narrowest search box that still shows its text.
     pub(crate) const SEARCH_TEXT: f32 = 160.0;
-
-    /// The fit in `room`, the width left of the account button; `discord` when its button shows.
-    pub(crate) fn new(room: f32, discord: bool, control_h: f32) -> TitleBarFit {
-        for discord_label in [true, false] {
-            let discord_w = match (discord, discord_label) {
-                (false, _) => 0.0,
-                (true, true) => 84.0 + 8.0,
-                (true, false) => 22.0 + 8.0,
-            };
-            let search = room - discord_w;
-            if search >= Self::SEARCH_TEXT {
-                return TitleBarFit { search: search.min(Self::SEARCH), discord_label };
-            }
-        }
-        TitleBarFit { search: control_h, discord_label: false }
-    }
 }
 
 /// The title bar's Search box while it is typed in (#5398): the query, whether the text of the

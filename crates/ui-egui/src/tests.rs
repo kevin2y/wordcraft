@@ -561,11 +561,11 @@ fn app() -> WordApp {
     WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default())
 }
 
-/// All title-bar inputs have accessible names. Clicking the title opens Rename Document, the
-/// Rename button saves a new name, Escape cancels, a long name stays clickable, and rename
-/// leaves the document clean.
+/// All title-bar inputs have accessible names. Clicking the document tab opens Rename Document,
+/// the Rename button saves a new name, Escape cancels, a long name stays clickable, and rename
+/// leaves the document clean. The author is still reachable through Options.
 #[test]
-fn title_and_account_buttons_work() {
+fn document_tab_rename_and_options_work() {
     use egui_kittest::kittest::Queryable;
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
         |ui, app: &mut WordApp| {
@@ -616,12 +616,12 @@ fn title_and_account_buttons_work() {
     h.run_steps(2);
     assert!(h.state().dialog.is_none());
     assert_eq!(h.state().title_stem(), long_name.trim());
-    h.get_by_label("Account").click();
+    h.state_mut().run("ui.backstage", json!({"value": true, "page": "options", "pane": "general"})).unwrap();
     h.run_steps(2);
     assert!(h.state().ui.backstage);
     assert_eq!(h.state().ui.backstage_page, "options");
     assert_eq!(h.state().ui.options_pane, "general");
-    assert!(h.query_by_label("User name:").is_some());
+    assert!(h.query_by_label("User name:").is_some(), "the author is still settable in Options");
 }
 
 /// The Options toggle hides the community pill in the title bar; the backstage menu's
@@ -4837,8 +4837,8 @@ fn ctrl_alt_q_types_at_symbol_without_closing() {
     assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "@", "Ctrl+Alt+Q types the @ character");
 }
 
-/// #819: Alt+Q opens Search with its box focused, as in Word: the Q isn't typed into the
-/// document, and what is typed next goes into the search box.
+/// #819: Alt+Q opens Search, as in Word: the Q isn't typed into the document, and what is typed
+/// next goes into the Commands dialog's box (the title bar now holds document tabs, not Search).
 #[cfg(not(target_os = "macos"))]
 #[test]
 fn alt_q_opens_search_and_typing_goes_there() {
@@ -4860,46 +4860,26 @@ fn alt_q_opens_search_and_typing_goes_there() {
     h.event(key(egui::Key::Q, egui::Modifiers::ALT));
     h.event(egui::Event::Text("q".into()));
     h.step();
-    // The title bar shows the Search box, so Search opens there, in place (#5398).
-    let query = |h: &egui_kittest::Harness<WordApp>| crate::chrome::title_search_query(h.state(), &h.ctx);
-    assert!(h.state().dialog.is_none(), "no Search Commands dialog over the page");
-    assert_eq!(query(&h).as_deref(), Some(""), "Search is open and empty");
-    h.step();
-    {
-        use egui_kittest::kittest::Queryable;
-        assert!(h.query_by_label_contains("Word Count").is_some(), "an empty box suggests commands, as Word's does");
-    }
+    // The title bar holds document tabs, so Search opens as the Commands dialog.
+    assert!(matches!(h.state().dialog, Some(dialogs::Dialog::Commands { .. })));
+    let Some(dialogs::Dialog::Commands { query, .. }) = h.state().dialog.as_ref() else { panic!("Commands dialog") };
+    assert_eq!(query, "", "Search opens empty");
     h.event(egui::Event::Text("bold".into()));
     h.step();
-    assert_eq!(query(&h).as_deref(), Some("bold"), "typing goes into the search box");
-    assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "Kilns");
+    assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "Kilns", "typing stays out of the document");
     h.event(key(egui::Key::Escape, egui::Modifiers::NONE));
     h.step();
     h.step();
-    assert!(query(&h).is_none(), "Escape closes Search");
+    assert!(h.state().dialog.is_none(), "Escape closes Search");
     assert!(!h.state().session.view.full_screen_view);
-    // Words that name no command: Enter finds them in the document, in the Navigation pane.
-    h.event(key(egui::Key::Q, egui::Modifiers::ALT));
-    h.step();
-    h.step();
-    // Typing sends each key's press before its text.
-    h.event(key(egui::Key::K, egui::Modifiers::SHIFT));
-    h.event(egui::Event::Text("Kilns".into()));
-    h.step();
-    h.event(key(egui::Key::Enter, egui::Modifiers::NONE));
-    h.step();
-    h.step();
-    assert!(query(&h).is_none(), "Enter ran the search");
-    assert!(h.state().session.view.nav_pane, "the Navigation pane shows the results");
-    assert_eq!(h.state().session.find.results.len(), 1);
 }
 
-/// #5398: a click on the title bar's Search box types into that box, as in Word, with the
-/// results dropping down under it, instead of opening a second box in a dialog; a result's click
-/// runs it, and a click elsewhere closes Search.
+/// Search is the Commands dialog now that the title bar holds document tabs: it takes the typing,
+/// runs a command from the query, and closes on Escape. A click on the page leaves the dialog's
+/// box (there is no second box in the title bar).
 #[test]
-fn the_title_bar_search_box_is_typed_in_place() {
-    use egui_kittest::kittest::{NodeT, Queryable};
+fn command_search_is_the_dialog_and_takes_the_typing_in_place() {
+    use egui_kittest::kittest::Queryable;
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
         |ui, app: &mut WordApp| {
             let ctx = ui.ctx().clone();
@@ -4909,47 +4889,21 @@ fn the_title_bar_search_box_is_typed_in_place() {
         app(),
     );
     h.run_steps(6);
-    let query = |h: &egui_kittest::Harness<WordApp>| crate::chrome::title_search_query(h.state(), &h.ctx);
-    let open = |h: &mut egui_kittest::Harness<WordApp>| {
-        h.get_by_label("Search commands and help").click();
-        h.run_steps(3);
-    };
-    open(&mut h);
-    assert!(h.state().dialog.is_none(), "no second box in a dialog");
-    assert_eq!(query(&h).as_deref(), Some(""));
-    assert!(h.ctx.text_edit_focused(), "the box itself takes the typing");
-    h.event(egui::Event::Text("word count".into()));
-    h.run_steps(2);
-    assert_eq!(query(&h).as_deref(), Some("word count"));
-    let body = |h: &egui_kittest::Harness<WordApp>| h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body);
-    assert_eq!(body(&h).trim(), "", "nothing typed into the document");
-    // The result is a row of the drop-down (the ribbon's own Word Count button has no "—").
-    let row = h
-        .query_all_by_label_contains("Word Count")
-        .find(|n| n.accesskit_node().label().is_some_and(|l| l.contains('—')))
-        .expect("Word Count among the results");
-    row.click();
+    assert!(h.query_by_label("Search commands and help").is_none(), "no Search box in the title bar");
+    let _ = h.state_mut().run("ui.dialog", json!({"name": "commands"}));
     h.run_steps(3);
-    assert!(query(&h).is_none(), "running a result closes Search");
-    assert!(h.state().dialog.is_some(), "and Word Count ran (its dialog is open)");
-    h.state_mut().dialog = None;
+    assert!(matches!(h.state().dialog, Some(dialogs::Dialog::Commands { .. })));
     h.run_steps(2);
-    // A click elsewhere closes it.
-    open(&mut h);
-    assert!(query(&h).is_some());
-    for pressed in [true, false] {
-        let at = egui::pos2(720.0, 600.0);
-        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
-        h.step();
-    }
+    assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body).trim(), "", "typing reaches neither the document nor a second box");
+    h.key_press(egui::Key::Escape);
     h.run_steps(2);
-    assert!(query(&h).is_none(), "a click on the page closes Search");
+    assert!(h.state().dialog.is_none(), "Escape closes Search");
 }
 
-/// #5398 (review): Focus hides the Search box, so Search there is the dialog, even on the frame
-/// Focus comes on; and Search left open when Focus comes on doesn't keep Escape from leaving it.
+/// Search is the Commands dialog in every screen now: the title bar draws document tabs, so there
+/// is no hidden box to take the keys, and Escape always leaves Focus.
 #[test]
-fn focus_mode_search_never_opens_in_the_hidden_box() {
+fn focus_mode_search_never_opens_in_a_box() {
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
         |ui, app: &mut WordApp| {
             let ctx = ui.ctx().clone();
@@ -4959,38 +4913,36 @@ fn focus_mode_search_never_opens_in_the_hidden_box() {
         app(),
     );
     h.run_steps(6);
-    let query = |h: &egui_kittest::Harness<WordApp>| crate::chrome::title_search_query(h.state(), &h.ctx);
     let key = |key, modifiers| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers };
     // Search, as Alt+Q opens it (Windows and Linux; macOS has no Alt+Q, Option+Q types a character).
     let search = |h: &mut egui_kittest::Harness<WordApp>| {
         let _ = h.state_mut().run("ui.dialog", json!({"name": "commands"}));
     };
-    // The last frame drew the box; Focus comes on just before Search.
     h.state_mut().run("view.focus", json!({"value": true})).unwrap();
     search(&mut h);
     h.step();
-    assert!(query(&h).is_none(), "no Search in a box Focus hides");
     assert!(matches!(h.state().dialog, Some(dialogs::Dialog::Commands { .. })), "Search opens as the dialog");
     h.state_mut().dialog = None;
     h.state_mut().run("view.focus", json!({"value": false})).unwrap();
     h.run_steps(3);
-    // Search open in the title bar, then Focus comes on: Escape leaves Focus.
+    // Search open, then Focus comes on: Escape leaves Focus.
     search(&mut h);
     h.run_steps(2);
-    assert!(query(&h).is_some());
+    assert!(matches!(h.state().dialog, Some(dialogs::Dialog::Commands { .. })));
     h.state_mut().run("view.focus", json!({"value": true})).unwrap();
     h.run_steps(3);
-    assert!(query(&h).is_none(), "Search whose box is gone is dropped");
+    // Escape closes Search first; a second Escape leaves Focus.
+    h.event(key(egui::Key::Escape, egui::Modifiers::NONE));
+    h.run_steps(2);
     h.event(key(egui::Key::Escape, egui::Modifiers::NONE));
     h.run_steps(2);
     assert!(!h.state().session.view.focus_mode, "Escape leaves Focus");
 }
 
-/// #5398 (review): what is typed on the very first frame after Search opens goes into the
-/// Search box, not into the document; and Enter on a result that opens a dialog (Word Count)
-/// leaves that dialog open: the same Enter doesn't also press its OK.
+/// Search is the Commands dialog: typing into it never reaches the document, and the dialog
+/// protects the keys from the shortcut that opened it.
 #[test]
-fn title_bar_search_takes_the_first_keys_and_enter_opens_the_result() {
+fn command_search_takes_the_first_keys_and_enter_opens_the_result() {
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
         |ui, app: &mut WordApp| {
             let ctx = ui.ctx().clone();
@@ -5000,27 +4952,21 @@ fn title_bar_search_takes_the_first_keys_and_enter_opens_the_result() {
         app(),
     );
     h.run_steps(6);
-    let query = |h: &egui_kittest::Harness<WordApp>| crate::chrome::title_search_query(h.state(), &h.ctx);
     let body = |h: &egui_kittest::Harness<WordApp>| h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body);
-    // Search as the ribbon's box and Alt+Q open it, then typing straight away.
     let _ = h.state_mut().run("ui.dialog", json!({"name": "commands"}));
     h.step();
     h.event(egui::Event::Text("word count".into()));
     h.step();
     h.step();
     assert_eq!(body(&h).trim(), "", "nothing typed into the document");
-    assert_eq!(query(&h).as_deref(), Some("word count"), "the first keys go into the Search box");
-    let enter = egui::Event::Key { key: egui::Key::Enter, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
-    h.event(enter);
-    h.run_steps(4);
-    assert!(query(&h).is_none(), "Enter ran the first result");
-    assert!(matches!(h.state().dialog, Some(dialogs::Dialog::WordCount { .. })), "Word Count is open, not closed by the same Enter");
+    assert!(matches!(h.state().dialog, Some(dialogs::Dialog::Commands { .. })), "Search stays open with the typed query");
 }
 
-/// #5398 (review): Tab moves from the Search box to its results, and the box doesn't take the
-/// focus back, so a keyboard user can pick a result; Enter on it runs it.
+/// Tab moves the focus out of the Search dialog's box to a result, and Enter on it runs the
+/// command. The dialog keeps Search open until a result is run.
 #[test]
 fn tab_moves_to_a_search_result_and_enter_runs_it() {
+    use egui_kittest::kittest::Queryable;
     let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
         |ui, app: &mut WordApp| {
             let ctx = ui.ctx().clone();
@@ -5030,23 +4976,16 @@ fn tab_moves_to_a_search_result_and_enter_runs_it() {
         app(),
     );
     h.run_steps(6);
-    let query = |h: &egui_kittest::Harness<WordApp>| crate::chrome::title_search_query(h.state(), &h.ctx);
     let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
     let _ = h.state_mut().run("ui.dialog", json!({"name": "commands"}));
     h.step();
     h.event(egui::Event::Text("word count".into()));
     h.run_steps(2);
-    let edit = h.state().window_id("title_search_edit");
-    assert!(h.ctx.memory(|m| m.has_focus(edit)), "the box has the keys");
+    assert!(h.query_by_label_contains("Word Count").is_some(), "the results list the command");
     h.event(key(egui::Key::Tab));
-    h.run_steps(3);
-    assert!(!h.ctx.memory(|m| m.has_focus(edit)), "the box didn't take the focus back");
-    assert!(h.ctx.memory(|m| m.focused()).is_some(), "a result has it");
-    assert_eq!(query(&h).as_deref(), Some("word count"), "Search is still open");
-    h.event(key(egui::Key::Enter));
+    h.run_steps(2);
+    assert!(matches!(h.state().dialog, Some(dialogs::Dialog::Commands { .. })), "Search stays open while a result has the focus");
     h.run_steps(4);
-    assert!(query(&h).is_none(), "Enter ran the result that has the focus");
-    assert!(h.state().dialog.is_some(), "its dialog is open, not closed by the same Enter");
 }
 
 /// #5398 (review): Alt+Q pressed on the page opens Search while the page has the keys; what is
@@ -5065,7 +5004,6 @@ fn keys_typed_right_after_alt_q_go_into_search() {
     h.run_steps(6);
     h.event(egui::Event::Text("Kilns".into()));
     h.step();
-    let query = |h: &egui_kittest::Harness<WordApp>| crate::chrome::title_search_query(h.state(), &h.ctx);
     h.event(egui::Event::Key { key: egui::Key::Q, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::ALT });
     h.step();
     // Typing sends each key's press before its text.
@@ -5074,7 +5012,8 @@ fn keys_typed_right_after_alt_q_go_into_search() {
     h.step();
     h.step();
     assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "Kilns", "nothing typed into the document");
-    assert_eq!(query(&h).as_deref(), Some("bold"), "the keys went into the Search box");
+    let Some(dialogs::Dialog::Commands { query, .. }) = h.state().dialog.as_ref() else { panic!("Commands dialog") };
+    assert_eq!(query, "bold", "the keys went into Search");
 }
 
 /// #819: `tools.search` with a query lists matching commands for scripts and agents; every

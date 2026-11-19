@@ -513,11 +513,15 @@ mod tests {
         let ctx = ctx();
         let mut n = 0;
         let mut a = app();
-        frame(&ctx, &mut n, vec![], |ui| crate::chrome::title_bar(&mut a, ui));
+        let draw = |ui: &mut egui::Ui, a: &mut WordApp| {
+            crate::chrome::title_bar(a, ui);
+            crate::ribbon::show(a, ui);
+        };
+        frame(&ctx, &mut n, vec![], |ui| draw(ui, &mut a));
         let more = ctx.read_response(crate::chrome::qat_menu_button_id()).unwrap();
         let popup = egui::Popup::default_response_id(&more);
         assert!(!egui::Popup::is_id_open(&ctx, popup));
-        click(&ctx, &mut n, more.rect.center(), |ui| crate::chrome::title_bar(&mut a, ui));
+        click(&ctx, &mut n, more.rect.center(), |ui| draw(ui, &mut a));
         assert!(egui::Popup::is_id_open(&ctx, popup), "the … button opens the Customize Quick Access Toolbar menu");
 
         a.run("tools.customizeRibbon", json!({"qatAdd": "file.new"})).unwrap();

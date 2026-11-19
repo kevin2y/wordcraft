@@ -79,6 +79,10 @@ pub use tabs::{
     StripPlan, TABS, TabSpec, contextual_tabs, fit_tabs, has_chart_selected, has_picture_selected, has_shape_selected, has_smart_art_selected,
     in_table_public, plan_strip, resolve_tab,
 };
+
+/// Room the AutoSave switch and Quick Access Toolbar need before the ribbon's tabs and its right
+/// buttons get their own: below this they fold away, as Word's toolbar does in a narrow window.
+const TOOLS_ROOM: f32 = 430.0;
 #[cfg(test)]
 use underline::{UNDERLINE_STYLES, underline_menu};
 use view::{outlining, view};
@@ -153,7 +157,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
     for (name, at, _) in &ghosts {
         tabs.insert((*at).min(tabs.len()), (name.clone(), false));
     }
-    // Tab strip.
+    // Tab strip. AutoSave and the Quick Access Toolbar moved here from the title bar, which now
+    // holds document tabs (WPS style): Save, Undo, Redo and … lead the row, then the ribbon tabs.
     egui::Panel::top("tabs")
         .exact_size(30.0)
         .frame(egui::Frame::NONE.fill(t.tab_strip).inner_margin(egui::Margin { left: 8, right: 10, top: 0, bottom: 0 }))
@@ -161,6 +166,17 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             crate::rtl::root(ui, |ui| {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing = vec2(2.0, 0.0);
+                    // The tools lead the strip. On a narrow window they would leave no room for the
+                    // tabs or Share/Editing/Comments, so they fold away, as Word's QAT does.
+                    if ui.available_width() >= TOOLS_ROOM {
+                        crate::chrome::autosave_switch(ui, app);
+                        ui.add_space(8.0);
+                        // Hidden (#1945): neither the buttons nor the … menu; the tabs keep their room.
+                        if app.ui.quick_access_toolbar {
+                            crate::chrome::quick_access(ui, app);
+                        }
+                        ui.add_space(8.0);
+                    }
                     // Share, Editing mode and Comments keep their room; the tabs get what is left of it
                     // (#897, #2026), and the buttons give up their labels before a tab is drawn over them.
                     let share = tl!("Share");
