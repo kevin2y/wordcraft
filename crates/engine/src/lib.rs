@@ -35,6 +35,7 @@ use serde_json::Value;
 
 pub use io::Password;
 pub use keymap::KeyMap;
+pub use locale::{set_bookmark_error, set_reference_error};
 pub use pdf_view::{LinkTarget, PdfChar, PdfLink, PdfRect, PdfView};
 pub use ribbon::RibbonLayout;
 pub use session::{

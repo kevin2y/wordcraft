@@ -174,6 +174,84 @@ pub(super) fn gridline_cells(page: &Page, all: bool, editing: Option<StoryRef>) 
     })
 }
 
+/// The table gridline segments to draw on a page, in document points: the edges of the
+/// [`gridline_cells`] minus the parts a printed border already draws. Word shows gridlines only
+/// where a cell has no border; drawn over a border, the thin blue guide tinted every bordered
+/// table blue and made its lines look uneven when zoomed out (#5967).
+pub(super) fn gridline_segments(page: &Page, all: bool, editing: Option<StoryRef>) -> Vec<(wordcraft_geom::Point, wordcraft_geom::Point)> {
+    use wordcraft_geom::Point;
+    // A rule this close to a cell edge (points) is drawn on it.
+    const ON_EDGE: f32 = 0.25;
+    // Rules by the line they run along (horizontal or not, coordinate in quarter points), so
+    // each cell edge looks only at the rules on its own line. Body rules cannot cover header or
+    // footer cells, so they are left out when only those are outlined, as in `gridline_cells`.
+    let key = |c: f32| (c * 4.0).round() as i64;
+    let body = if all { page.items.as_slice() } else { &[] };
+    let mut rules: std::collections::HashMap<(bool, i64), Vec<(f32, f32, f32)>> = std::collections::HashMap::new();
+    for it in body.iter().chain(&page.header).chain(&page.footer) {
+        let Placed::Rule { x0, y0, x1, y1, border } = it else { continue };
+        if !border.is_visible() {
+            continue;
+        }
+        let (horizontal, c0, c1, s0, s1) = if (y0 - y1).abs() <= ON_EDGE { (true, *y0, *y1, *x0, *x1) } else { (false, *x0, *x1, *y0, *y1) };
+        if (c0 - c1).abs() <= ON_EDGE && c0.is_finite() {
+            rules.entry((horizontal, key(c0))).or_default().push((c0, s0.min(s1), s0.max(s1)));
+        }
+    }
+    // The rules covering the line at `at`, sorted and merged into disjoint spans. Cells share their
+    // edges, so each distinct line is sorted once (not once per cell edge) and every edge then
+    // binary-searches its start.
+    let mut merged: std::collections::HashMap<(bool, u32), Vec<(f32, f32)>> = std::collections::HashMap::new();
+    // The parts of [a, b] along a line at `at` that no rule on the same line covers; `horizontal`
+    // picks rules running along x at y = `at`, otherwise along y at x = `at`.
+    let mut uncovered = |horizontal: bool, at: f32, a: f32, b: f32| -> Vec<(f32, f32)> {
+        let covers = merged.entry((horizontal, at.to_bits())).or_insert_with(|| {
+            let k = key(at);
+            let mut covers: Vec<(f32, f32)> = (k - 1..=k + 1)
+                .filter_map(|k| rules.get(&(horizontal, k)))
+                .flatten()
+                .filter(|(c, _, _)| (c - at).abs() <= ON_EDGE)
+                .map(|&(_, s0, s1)| (s0, s1))
+                .collect();
+            covers.sort_by(|p, q| p.0.total_cmp(&q.0));
+            let mut spans: Vec<(f32, f32)> = Vec::with_capacity(covers.len());
+            for (c0, c1) in covers {
+                match spans.last_mut() {
+                    Some(last) if c0 <= last.1 + ON_EDGE => last.1 = last.1.max(c1),
+                    _ => spans.push((c0, c1)),
+                }
+            }
+            spans
+        });
+        let mut out = Vec::new();
+        let mut from = a;
+        for &(c0, c1) in &covers[covers.partition_point(|s| s.1 < a)..] {
+            if c0 > from + ON_EDGE {
+                out.push((from, c0.min(b)));
+            }
+            from = from.max(c1);
+            if from >= b {
+                break;
+            }
+        }
+        if from + ON_EDGE < b {
+            out.push((from, b));
+        }
+        out
+    };
+    let mut segs = Vec::new();
+    for r in gridline_cells(page, all, editing) {
+        let (l, t, rt, bt) = (r.x, r.y, r.x + r.w, r.y + r.h);
+        for y in [t, bt] {
+            segs.extend(uncovered(true, y, l, rt).into_iter().map(|(a, b)| (Point::new(a, y), Point::new(b, y))));
+        }
+        for x in [l, rt] {
+            segs.extend(uncovered(false, x, t, bt).into_iter().map(|(a, b)| (Point::new(x, a), Point::new(x, b))));
+        }
+    }
+    segs
+}
+
 /// The drawing grid's spacing in points at a screen scale: the document's spacing (`w:drawingGrid*Spacing`;
 /// ECMA-376's 1/8 inch when it doesn't say), doubled until the lines are at least
 /// [`DRAWING_GRID_MIN_PX`] apart on screen.
@@ -202,8 +280,11 @@ pub(super) fn shown_layout(app: &mut WordApp) -> std::sync::Arc<DocLayout> {
     app.canvas.command_previewed = command.clone().filter(|_| table.is_none());
     let Some((id, params)) = table.or(command) else {
         app.canvas.table_preview_layout = None;
-        return app.session.layout();
+        return ime_shown_layout(app);
     };
+    // A command preview takes over the page; the composition goes back to being painted as an
+    // overlay so the two previews never fight over the same layout.
+    app.canvas.ime_preview = None;
     // The caret can move, or the view change, with the grid still hovered: the table then goes
     // somewhere else, or the page is laid out to another width.
     let key = ((id.clone(), params.clone(), app.session.document_id(), app.session.rev(), app.session.sel.clone()), app.session.layout());
@@ -225,16 +306,87 @@ pub(super) fn shown_layout(app: &mut WordApp) -> std::sync::Arc<DocLayout> {
     }
 }
 
-/// The document the pages of [`shown_layout`] are drawn from: the previewed copy while the page
-/// shows Insert › Table's preview, whose paragraph paths are the layout's (#3931).
+/// The layout shown while an input method composes in the body: the document with the pre-edit
+/// inserted at the caret so the text on its right reflows right. Built on a copy and cached by
+/// everything that can change it, so an idle composition frame does not lay the document out
+/// again. Falls back to the document's own layout outside a body composition.
+fn ime_shown_layout(app: &mut WordApp) -> std::sync::Arc<DocLayout> {
+    let preedit = app.canvas.ime_preedit.clone();
+    // A pointer press discarded the composition and moved the caret. Do not lay the pre-edit out
+    // again at that new position while the platform is still winding the old composition down.
+    if preedit.is_empty() || app.canvas.ime_dismissed_preedit.is_some() || app.session.math.is_some() {
+        app.canvas.ime_preview = None;
+        return app.session.layout();
+    }
+    let cursor = super::preedit_cursor_chars(&preedit, app.canvas.ime_preedit_range.as_ref());
+    let document = app.session.document_id();
+    let rev = app.session.rev();
+    let real_sel = app.session.sel.clone();
+    let base = app.session.layout();
+    if let Some(p) = &app.canvas.ime_preview
+        && p.preedit == preedit
+        && p.cursor_chars == cursor
+        && p.document == document
+        && p.rev == rev
+        && p.real_sel == real_sel
+        && std::sync::Arc::ptr_eq(&p.base, &base)
+    {
+        return p.layout.clone();
+    }
+    match app.session.ime_preview_layout(&preedit, cursor) {
+        Some((doc, sel, layout)) => {
+            app.canvas.ime_preview = Some(super::ImePreview {
+                preedit,
+                cursor_chars: cursor,
+                document,
+                rev,
+                real_sel,
+                base,
+                doc,
+                sel,
+                layout: layout.clone(),
+            });
+            layout
+        }
+        None => {
+            app.canvas.ime_preview = None;
+            base
+        }
+    }
+}
+
+/// The document the page's layout belongs to: the previewed copy while the page shows Insert ›
+/// Table's preview, whose paragraph paths are the layout's (#3931). This is also the document
+/// a11y and non-caret selection drawing use; an input method's composition is *not* a document
+/// change, so it must not leak into those paths.
 pub(crate) fn page_doc(app: &WordApp) -> &wordcraft_doc::Document {
     app.canvas.table_preview_layout.as_ref().map_or(&app.session.doc, |(_, doc, _, _)| doc)
 }
 
+/// The document the page pixels are drawn from. While an input method composes in the body this
+/// is the copy with the pre-edit inserted, so the text on its right reflows right; `page_doc`
+/// stays the real document for everything that is not a page raster or its caret.
+pub(crate) fn shown_doc(app: &WordApp) -> &wordcraft_doc::Document {
+    if let Some(p) = &app.canvas.ime_preview {
+        return &p.doc;
+    }
+    page_doc(app)
+}
+
 /// The previewed copy's selection while the page shows Insert › Table's preview: the caret and
 /// selection are drawn from it, as the document's own name other places in the preview's layout.
+/// An input method's composition is not a selection change: a11y and find keep the real one.
 pub(crate) fn preview_sel(app: &WordApp) -> Option<&wordcraft_engine::Selection> {
     app.canvas.table_preview_layout.as_ref().map(|(_, _, sel, _)| sel)
+}
+
+/// The selection whose caret is drawn on the page: the input method's cursor inside its
+/// composition when there is one, otherwise the table preview's or the document's own.
+pub(crate) fn shown_sel(app: &WordApp) -> Option<&wordcraft_engine::Selection> {
+    if let Some(p) = &app.canvas.ime_preview {
+        return Some(&p.sel);
+    }
+    preview_sel(app)
 }
 
 /// Whether the pages are drawn dark: View › Switch Modes, or in Read Mode the Page color's

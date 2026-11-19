@@ -1,3 +1,4 @@
+use super::pages::gridline_cells;
 use super::*;
 use crate::table_resize::tests::{H, cell, screen, steps, table_window};
 
@@ -82,6 +83,453 @@ fn the_preview_follows_the_caret_and_the_view() {
     app.canvas.table_preview = Some((2, 2));
     let web = shown_layout(&mut app);
     assert_eq!(web.pages[0].w, app.session.layout().pages[0].w, "laid out at the Web view's width");
+}
+
+/// IME pre-edit is shown by the page raster, laid out into a copy at the caret, so the glyphs on
+/// its right reflow right. It is cached for still frames and dropped as soon as the composition
+/// ends; the document, its revision and the undo history stay untouched.
+#[test]
+fn the_page_shows_the_input_method_composition_in_the_document() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("甲乙")), Default::default());
+    app.session.run("caret.docStart", &json!({})).unwrap();
+    app.session.run("caret.right", &json!({})).unwrap();
+    let (doc, rev, sel) = (app.session.doc.clone(), app.session.rev(), app.session.sel.clone());
+    let base_off = app.session.sel.focus.off;
+
+    app.canvas.ime_preedit = "にほん".into();
+    app.canvas.ime_preedit_range = Some(0..1);
+    let layout = shown_layout(&mut app);
+    assert!(!std::sync::Arc::ptr_eq(&layout, &app.session.layout()), "the page has the composed layout");
+    assert_eq!(shown_doc(&app).plain_text(StoryRef::Body), "甲にほん乙");
+    assert!(!std::ptr::eq(shown_doc(&app), &app.session.doc), "the raster is drawn from the copy");
+    // A composition is not a document or selection change: a11y, find and window state keep the
+    // real ones. Only the raster and its caret see the copy.
+    assert_eq!(page_doc(&app).plain_text(StoryRef::Body), "甲乙");
+    assert!(preview_sel(&app).is_none());
+    let composed_caret = shown_sel(&app).expect("the composition's caret").clone();
+    assert_eq!(composed_caret.focus.off, base_off + 3, "one kana into the pre-edit");
+    let base = app.session.layout();
+    let before = base.caret_on(&sel.focus, 0).unwrap();
+    let after = layout.caret_on(&wordcraft_doc::Pos { off: base_off + "にほん".len(), ..composed_caret.focus.clone() }, 0).unwrap();
+    assert!(after.x > before.x + 1.0, "乙 moved right: {} > {}", after.x, before.x);
+    assert_eq!((&app.session.doc, app.session.rev(), &app.session.sel, app.session.can_undo()), (&doc, rev, &sel, false));
+
+    app.canvas.ime_preedit = "にほん".into();
+    app.canvas.ime_preedit_range = Some(0..1);
+    let again = shown_layout(&mut app);
+    assert!(std::sync::Arc::ptr_eq(&layout, &again), "an unchanged composition reuses its layout");
+
+    app.canvas.ime_preedit_range = Some(0..0);
+    let moved = shown_layout(&mut app);
+    assert!(!std::sync::Arc::ptr_eq(&layout, &moved), "the caret moving through the pre-edit rebuilds it");
+    assert_eq!(shown_sel(&app).unwrap().focus.off, base_off, "the caret is at the composition's start");
+
+    app.canvas.ime_preedit.clear();
+    app.canvas.ime_preedit_range = None;
+    assert!(std::sync::Arc::ptr_eq(&shown_layout(&mut app), &app.session.layout()));
+    assert!(std::ptr::eq(page_doc(&app), &app.session.doc), "the composition is gone: the document's own pages");
+    assert!(preview_sel(&app).is_none());
+    assert!(app.canvas.ime_preview.is_none());
+}
+
+/// #6916: clicks and the accessibility tree use the document's layout, not the composition copy.
+/// A hit in the copy carries the pre-edit's byte offset, so writing it back as the real selection
+/// would move the caret past 乙 (or past the paragraph end) and land a later insert in the wrong
+/// place. The page pixels still use the copy so the text to the right reflows.
+#[test]
+fn composition_keeps_hit_testing_and_a11y_on_the_real_document() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("甲乙")), Default::default());
+    app.session.run("caret.docStart", &json!({})).unwrap();
+    app.session.run("caret.right", &json!({})).unwrap();
+
+    app.canvas.ime_preedit = "にほん".into();
+    app.canvas.ime_preedit_range = Some(1..2);
+    let shown = shown_layout(&mut app);
+    assert!(app.canvas.ime_preview.is_some());
+    let real = document_layout(&mut app, &shown);
+    assert!(
+        std::sync::Arc::ptr_eq(&real, &app.session.layout()),
+        "hits and a11y read the real document, whose offsets the session and selection use"
+    );
+    assert!(!std::sync::Arc::ptr_eq(&real, &shown), "the page pixels still reflow with the pre-edit");
+
+    // The real caret is a position the session can use, with no pre-edit offset mixed in.
+    assert!(real.caret_on(&app.session.sel.focus, 0).is_some(), "the real caret is a valid hit target");
+
+    app.canvas.ime_preedit.clear();
+    app.canvas.ime_preedit_range = None;
+    let plain = shown_layout(&mut app);
+    assert!(std::sync::Arc::ptr_eq(&document_layout(&mut app, &plain), &plain), "no composition: one layout everywhere");
+}
+
+/// #6916: a right-click during a composition interrupts it instead of leaving the uncommitted
+/// text to drift to the pointer. The caret must not move to the clicked spot in the meantime, and
+/// the context menu still opens at the pointer. On Windows the interrupt normally cancels the
+/// composition, so the pre-edit does not enter the body; the last part of this test covers the
+/// rarer platform that answers with a result string, which must land at the composition.
+#[test]
+fn right_click_interrupts_the_composition_instead_of_dragging_it() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("甲乙丙丁")), Default::default());
+    app.session.run("caret.docStart", &json!({})).unwrap();
+    app.session.run("caret.right", &json!({})).unwrap();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_context_setup(kana_test_glyphs)
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+    for _ in 0..8 {
+        h.step();
+    }
+    // A live composition at the caret between 甲 and 乙.
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "にほん".into(), active_range_chars: Some(0..0) }));
+    h.step();
+    h.step();
+    assert!(h.state().canvas.ime_preview.is_some(), "the composition is shown in the page copy");
+    let caret_off = h.state().session.sel.focus.off;
+
+    // Right-click far to the right of the composition, on the same page.
+    let at = h.state().canvas.page_rects.first().map(|r| egui::pos2(r.max.x - 12.0, r.center().y)).expect("a page");
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    let mut interrupted = false;
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+        h.step();
+        interrupted |= h.output().platform_output.ime.as_ref().is_some_and(|ime| ime.should_interrupt_composition);
+    }
+    assert!(interrupted, "the right-click interrupts the composition");
+    assert_eq!(h.state().session.sel.focus.off, caret_off, "the caret stays at the composition, it does not drift to the pointer");
+    assert!(h.state().canvas.context_menu_open, "the context menu still opens at the pointer");
+    assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "甲乙丙丁", "an interrupted composition is not written into the body");
+
+    // A platform that does answer the interrupt with a result string: it lands where it was
+    // composed, between 甲 and 乙, not at the spot under the mouse.
+    h.event(egui::Event::Ime(egui::ImeEvent::Commit("にほん".into())));
+    h.step();
+    h.step();
+    let text = h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body);
+    assert_eq!(text, "甲にほん乙丙丁", "the committed text stays at the composition: {text:?}");
+}
+
+/// #6916 review: a composition over a range has no preview copy (it falls back to the overlay),
+/// but its pre-edit is still live. A right-click must not move the caret to the pointer in that
+/// case either, or any platform result would land away from the composition it belongs to.
+#[test]
+fn right_click_keeps_the_caret_when_the_composition_has_no_preview() {
+    let (mut h, at) = composing_harness();
+    // `ime_preview_layout` refuses a non-collapsed selection, so there is no page copy to check.
+    h.state_mut().session.sel = wordcraft_engine::Selection {
+        anchor: wordcraft_doc::Pos::body(0, 3),
+        focus: wordcraft_doc::Pos::body(0, 6),
+    };
+    h.step();
+    assert!(!h.state().canvas.ime_preedit.is_empty(), "the composition is still live");
+    assert!(h.state().canvas.ime_preview.is_none(), "a range selection has no preview layout");
+    let sel = h.state().session.sel.clone();
+
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
+        h.step();
+    }
+    assert_eq!(h.state().session.sel, sel, "the caret stays at the composition, not at the pointer");
+    assert!(h.state().canvas.context_menu_open, "the context menu still opens at the pointer");
+}
+
+/// #6916: a left-click places the caret at the pointer, but a live composition must not be rebuilt
+/// there and appear to follow the mouse. The click discards the pre-edit instead: on Windows an
+/// interrupt only cancels, so no `Commit` arrives and the text stays out of the body. This drives
+/// the real platform behaviour — nothing is injected after the interrupt.
+#[test]
+fn left_click_discards_the_composition_without_drifting_to_the_pointer() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("甲乙丙丁")), Default::default());
+    app.session.run("caret.docStart", &json!({})).unwrap();
+    app.session.run("caret.right", &json!({})).unwrap();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_context_setup(kana_test_glyphs)
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+    for _ in 0..8 {
+        h.step();
+    }
+    // A live composition at the caret between 甲 and 乙.
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "にほん".into(), active_range_chars: Some(0..0) }));
+    h.step();
+    h.step();
+    assert!(h.state().canvas.ime_preview.is_some(), "the composition is shown in the page copy");
+
+    // Left-click far to the right of the composition, on the same page.
+    let at = h.state().canvas.page_rects.first().map(|r| egui::pos2(r.max.x - 12.0, r.center().y)).expect("a page");
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    let mut interrupted = false;
+    for pressed in [true, false] {
+        h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() });
+        h.step();
+        interrupted |= h.output().platform_output.ime.as_ref().is_some_and(|ime| ime.should_interrupt_composition);
+    }
+    for _ in 0..3 {
+        h.step();
+    }
+
+    assert!(interrupted, "the left-click interrupts the composition");
+    assert!(h.state().canvas.ime_preedit.is_empty(), "the pre-edit is discarded on the click, not moved to the pointer");
+    assert!(h.state().canvas.ime_preview.is_none(), "no preview copy is left to drift under the pointer");
+    let text = h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body);
+    assert_eq!(text, "甲乙丙丁", "the cancelled composition does not enter the body: {text:?}");
+}
+
+/// A live "にほん" composition between 甲 and 乙, with the pointer parked far to its right.
+fn composing_harness() -> (H, egui::Pos2) {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("甲乙丙丁")), Default::default());
+    app.session.run("caret.docStart", &json!({})).unwrap();
+    app.session.run("caret.right", &json!({})).unwrap();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_context_setup(kana_test_glyphs)
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+    for _ in 0..8 {
+        h.step();
+    }
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "にほん".into(), active_range_chars: Some(0..0) }));
+    h.step();
+    h.step();
+    assert!(h.state().canvas.ime_preview.is_some(), "the composition is shown in the page copy");
+    let at = h.state().canvas.page_rects.first().map(|r| egui::pos2(r.max.x - 12.0, r.center().y)).expect("a page");
+    h.event(egui::Event::PointerMoved(at));
+    h.step();
+    (h, at)
+}
+
+fn primary_button(at: egui::Pos2, pressed: bool) -> egui::Event {
+    egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed, modifiers: Default::default() }
+}
+
+fn shown_text(h: &H) -> String {
+    shown_doc(h.state()).plain_text(wordcraft_doc::StoryRef::Body)
+}
+
+/// #6916: a left press moves the caret on the very frame it arrives. The composition must be
+/// dropped *before* that, and before `shown_layout` builds the page copy again — otherwise the
+/// discarded pre-edit is inserted at the pointer and looks as if it followed the mouse. The page
+/// raster is drawn from `shown_doc`, so assert on what is actually painted, not just on the flag.
+#[test]
+fn left_press_stops_painting_the_composition_before_the_caret_moves() {
+    let (mut h, at) = composing_harness();
+    assert_eq!(shown_text(&h), "甲にほん乙丙丁");
+    h.event(primary_button(at, true));
+    h.step();
+    assert!(h.state().canvas.ime_preedit.is_empty(), "the pre-edit is discarded on the press");
+    assert!(h.state().canvas.ime_preview.is_none(), "the cached page copy is dropped too");
+    assert_eq!(shown_text(&h), "甲乙丙丁", "the press frame paints only the real document");
+    assert!(h.state().session.sel.focus.off > 3, "the caret still moves to the click");
+    for _ in 0..3 {
+        h.step();
+        assert_eq!(shown_text(&h), "甲乙丙丁", "no later frame rebuilds the pre-edit under the pointer");
+    }
+    h.event(primary_button(at, false));
+    h.step();
+    assert!(h.output().platform_output.ime.as_ref().is_some_and(|ime| ime.should_interrupt_composition), "the click interrupts the platform's composition");
+}
+
+/// #6916: the interrupt reaches the platform a frame or two later, and Windows can keep reporting
+/// the old pre-edit (and even queue a result string) in the meantime. None of it may be painted
+/// again at the new caret, and none of it may enter the body.
+#[test]
+fn stale_platform_events_after_a_click_are_neither_painted_nor_committed() {
+    let (mut h, at) = composing_harness();
+    h.event(primary_button(at, true));
+    h.step();
+    h.event(primary_button(at, false));
+    h.step();
+    for _ in 0..2 {
+        h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "にほん".into(), active_range_chars: Some(0..0) }));
+        h.step();
+        h.step();
+        assert!(h.state().canvas.ime_preedit.is_empty(), "the stale pre-edit is not held");
+        assert!(h.state().canvas.ime_preview.is_none(), "the stale pre-edit is not laid out");
+        assert_eq!(shown_text(&h), "甲乙丙丁", "the discarded text is not painted");
+    }
+    h.event(egui::Event::Ime(egui::ImeEvent::Commit("にほん".into())));
+    h.step();
+    h.step();
+    assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "甲乙丙丁", "a cancelled composition never enters the body");
+}
+
+/// #6916 review: a `Commit` queued in the same input batch as the press belongs to the
+/// composition the press discards. It must not reach `ime_commit` before the dismissal is
+/// recorded, or the discarded text lands in the body anyway.
+#[test]
+fn a_commit_in_the_press_batch_is_discarded_with_the_composition() {
+    let (mut h, at) = composing_harness();
+    // `Harness::event` gives every queued event its own frame; a real raw input batch can hold
+    // both. Push them straight into the next frame's input so they really share a batch.
+    h.input_mut().events.push(egui::Event::Ime(egui::ImeEvent::Commit("にほん".into())));
+    h.input_mut().events.push(primary_button(at, true));
+    h.step();
+    h.event(primary_button(at, false));
+    h.step();
+    assert_eq!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body), "甲乙丙丁", "the same-batch commit does not enter the body");
+    assert_eq!(shown_text(&h), "甲乙丙丁", "nor is it painted");
+}
+
+/// #6916 review: dropping one quarantined `Commit` ends that composition. A second commit in
+/// the same batch is fresh input and must still reach `ime_commit`.
+#[test]
+fn only_one_commit_is_quarantined_after_a_press() {
+    let (mut h, at) = composing_harness();
+    // One raw batch, not three frames: `Harness::event` would give each event its own frame.
+    h.input_mut().events.push(primary_button(at, true));
+    h.input_mut().events.push(egui::Event::Ime(egui::ImeEvent::Commit("にほん".into())));
+    h.input_mut().events.push(egui::Event::Ime(egui::ImeEvent::Commit("あ".into())));
+    h.step();
+    h.event(primary_button(at, false));
+    h.step();
+    let text = h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body);
+    assert!(!text.contains("にほん"), "the canceled composition is dropped: {text:?}");
+    assert!(text.contains('あ'), "the following commit is fresh input: {text:?}");
+}
+
+/// #6916 review: ordinary typing after a dismissal ends the quarantine. egui sends a pressed
+/// `Key` before the `Text` of every real keystroke, so the key releases the quarantine and the
+/// fresh `Text` reaches the document. A later genuine `Commit` must then reach `ime_commit` too.
+#[test]
+fn fresh_input_after_a_dismissal_releases_the_commit_quarantine() {
+    let (mut h, at) = composing_harness();
+    h.event(primary_button(at, true));
+    h.step();
+    h.event(primary_button(at, false));
+    h.step();
+    // A real keystroke is Key { pressed: true } followed by Text in the same batch.
+    h.input_mut().events.push(egui::Event::Key { key: egui::Key::X, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    h.input_mut().events.push(egui::Event::Text("X".into()));
+    h.step();
+    assert!(h.state().canvas.ime_dismissed_preedit.is_none(), "typing ends the quarantine");
+    h.event(egui::Event::Ime(egui::ImeEvent::Commit("あ".into())));
+    h.step();
+    h.step();
+    let text = h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body);
+    assert!(text.contains('X'), "the fresh text reaches the document: {text:?}");
+    assert!(text.contains('あ'), "a fresh commit reaches the document: {text:?}");
+}
+
+/// #6916 review (CodeRabbit r4611363553): some platforms replace a canceled composition with a
+/// bare `Text` followed by `Commit`, with no `DeleteSurrounding` first. Neither may be written at
+/// the caret the press moved to. A bare `Text` is distinguishable from typing because egui always
+/// puts a pressed `Key` before typing's `Text`; a quarantined bare `Text` is replacement residue.
+#[test]
+fn a_bare_text_commit_pair_after_a_dismissal_is_not_written() {
+    let (mut h, at) = composing_harness();
+    h.event(primary_button(at, true));
+    h.step();
+    h.event(primary_button(at, false));
+    h.step();
+    h.step();
+    // Same batch: no Key, so this Text is the canceled composition's replacement, not typing.
+    h.input_mut().events.push(egui::Event::Text("にほん".into()));
+    h.input_mut().events.push(egui::Event::Ime(egui::ImeEvent::Commit("にほん".into())));
+    h.step();
+    h.step();
+    let text = h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body);
+    assert_eq!(text, "甲乙丙丁", "neither the replacement Text nor its Commit enters the body: {text:?}");
+    assert_eq!(shown_text(&h), "甲乙丙丁", "nor is either painted");
+}
+
+/// #6916 review: Windows can emit an empty pre-edit immediately before the canceled
+/// composition's result string, in the frame *after* the press (when the batch-local interrupted
+/// flag is already gone). Treating that empty pre-edit as an acknowledgement would let the
+/// result string into the body at the caret the press moved to.
+#[test]
+fn an_empty_preedit_keeps_the_dismissal_through_a_late_commit() {
+    let (mut h, at) = composing_harness();
+    h.event(primary_button(at, true));
+    h.step();
+    h.event(primary_button(at, false));
+    h.step();
+    h.step();
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: String::new(), active_range_chars: None }));
+    h.event(egui::Event::Ime(egui::ImeEvent::Commit("にほん".into())));
+    h.step();
+    h.step();
+    let text = h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body);
+    assert_eq!(text, "甲乙丙丁", "the empty pre-edit does not release the quarantine: {text:?}");
+    assert!(h.state().canvas.ime_dismissed_preedit.is_none(), "the consumed result ends the quarantine");
+}
+
+/// #6916 review: a surrounding deletion queued for the discarded composition must not erase
+/// body text at the caret the press moved to; its paired replacement is dropped as well.
+#[test]
+fn a_dismissed_composition_delete_pair_does_not_erase_the_body() {
+    let (mut h, at) = composing_harness();
+    h.event(primary_button(at, true));
+    h.step();
+    h.event(primary_button(at, false));
+    h.step();
+    h.step();
+    h.event(egui::Event::Ime(egui::ImeEvent::DeleteSurroundingBytes { before_bytes: 3, after_bytes: 0 }));
+    h.event(egui::Event::Ime(egui::ImeEvent::Commit("にほん".into())));
+    h.step();
+    h.step();
+    let text = h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body);
+    assert_eq!(text, "甲乙丙丁", "neither the deletion nor its replacement touches the body: {text:?}");
+}
+
+/// The dismissal is scoped to the composition the click ended: a genuinely new composition must
+/// still be laid out at the caret the click placed.
+#[test]
+fn a_new_composition_after_a_click_is_painted_at_the_new_caret() {
+    let (mut h, at) = composing_harness();
+    h.event(primary_button(at, true));
+    h.step();
+    h.event(primary_button(at, false));
+    h.step();
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "に".into(), active_range_chars: None }));
+    h.step();
+    h.step();
+    assert_eq!(h.state().canvas.ime_preedit, "に", "a different pre-edit starts a fresh composition");
+    assert!(h.state().canvas.ime_dismissed_preedit.is_none(), "the dismissal is cleared");
+    assert!(h.state().canvas.ime_preview.is_some(), "the fresh composition is laid out");
+    assert_eq!(h.state().canvas.ime_preview.as_ref().unwrap().real_sel, h.state().session.sel, "at the caret the click placed");
+    assert!(shown_text(&h).ends_with("に"), "the new pre-edit is at the new caret: {:?}", shown_text(&h));
+}
+
+/// A table preview takes over the page; the input method's pre-edit goes back to being an overlay
+/// rather than leaving the two previews fighting over the same raster.
+#[test]
+fn a_table_preview_takes_over_from_an_input_method_composition() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::from_text("Lanterns")), Default::default());
+    app.canvas.ime_preedit = "に".into();
+    app.canvas.ime_preedit_range = Some(0..1);
+    let composed = shown_layout(&mut app);
+    assert!(app.canvas.ime_preview.is_some());
+
+    app.canvas.table_preview = Some((2, 2));
+    let table = shown_layout(&mut app);
+    assert!(!std::sync::Arc::ptr_eq(&composed, &table));
+    assert!(app.canvas.ime_preview.is_none(), "the composition falls back to the overlay");
+    assert!(table.index.keys().any(|(st, p)| *st == StoryRef::Body && p.0.len() == 4));
 }
 
 /// A window-following layout size (#1876, Read Mode): applied at once on entry or when forced,
@@ -635,12 +1083,12 @@ fn multi_click_drag_extends_by_units() {
     for _ in 0..6 {
         h.step();
     }
-    let screen = |h: &mut egui_kittest::Harness<'_, WordApp>, pos: Pos| {
+    let screen = |h: &mut H, pos: Pos| {
         let c = h.state_mut().session.layout().caret(&pos).expect("caret");
         page_to_screen(h.state_mut(), c.page, c.x + 1.0, c.top + c.height / 2.0).expect("on screen")
     };
     let button = |at: Pos2, pressed: bool| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
-    let multi_drag = |h: &mut egui_kittest::Harness<'_, WordApp>, from: Pos2, to: Pos2, clicks: usize| {
+    let multi_drag = |h: &mut H, from: Pos2, to: Pos2, clicks: usize| {
         h.event(Event::PointerMoved(from));
         for i in 0..clicks {
             h.event(button(from, true));
@@ -871,7 +1319,7 @@ fn clicking_vertical_scrollbar_track_advances_one_screen() {
 
     let button = |at: Pos2, pressed: bool| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
 
-    let click = |h: &mut egui_kittest::Harness<'_, WordApp>, at: Pos2| {
+    let click = |h: &mut H, at: Pos2| {
         h.event(Event::PointerMoved(at));
         h.step();
         h.event(button(at, true));
@@ -939,7 +1387,7 @@ fn clicking_vertical_scrollbar_track_advances_one_screen_in_rtl() {
 
     let button = |at: Pos2, pressed: bool| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
 
-    let click = |h: &mut egui_kittest::Harness<'_, WordApp>, at: Pos2| {
+    let click = |h: &mut H, at: Pos2| {
         h.event(Event::PointerMoved(at));
         h.step();
         h.event(button(at, true));
@@ -1002,7 +1450,7 @@ fn clicking_thin_vertical_scrollbar_track_advances_one_screen() {
 
     let button = |at: Pos2, pressed: bool| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
 
-    let click = |h: &mut egui_kittest::Harness<'_, WordApp>, at: Pos2| {
+    let click = |h: &mut H, at: Pos2| {
         h.event(Event::PointerMoved(at));
         h.step();
         h.event(button(at, true));
@@ -1195,11 +1643,11 @@ fn ctrl_drag_copies_an_object() {
     for _ in 0..6 {
         h.step();
     }
-    let objects = |h: &mut egui_kittest::Harness<'_, WordApp>| {
+    let objects = |h: &mut H| {
         let doc = &h.state().session.doc;
         doc.para(wordcraft_doc::StoryRef::Body, &wordcraft_doc::Path::top(0)).map_or(0, |p| p.objects.len())
     };
-    let xs = |h: &mut egui_kittest::Harness<'_, WordApp>| {
+    let xs = |h: &mut H| {
         let mut v: Vec<i32> = Vec::new();
         for x in (0..600).step_by(50) {
             if h.state_mut().session.layout().find_object(0, |o| (o.rect.x - x as f32).abs() < 0.5).is_some() {
@@ -1208,7 +1656,7 @@ fn ctrl_drag_copies_an_object() {
         }
         v
     };
-    let drag = |h: &mut egui_kittest::Harness<'_, WordApp>, mods: Modifiers| {
+    let drag = |h: &mut H, mods: Modifiers| {
         let from = page_to_screen(h.state_mut(), 0, 250.0, 330.0).expect("on screen");
         let to = page_to_screen(h.state_mut(), 0, 400.0, 330.0).expect("on screen");
         h.event(Event::ModifiersChanged(mods));
@@ -1257,19 +1705,19 @@ fn selection_bar_clicks_select_lines() {
         h.step();
     }
     // A point in the left margin beside the line `li` lines below the one holding `pos`.
-    let margin = |h: &mut egui_kittest::Harness<'_, WordApp>, pos: Pos, li: f32| {
+    let margin = |h: &mut H, pos: Pos, li: f32| {
         let c = h.state_mut().session.layout().caret(&pos).expect("caret");
         page_to_screen(h.state_mut(), c.page, 30.0, c.top + c.height * (li + 0.5)).expect("on screen")
     };
-    let line_start = |h: &mut egui_kittest::Harness<'_, WordApp>, at: Pos2| {
+    let line_start = |h: &mut H, at: Pos2| {
         let (rects, scale) = (h.state().canvas.page_rects.clone(), h.state().canvas.scale);
         let layout = h.state_mut().session.layout();
         let (pg, x, y) = page_at(&rects, &layout, scale, at).expect("page");
         layout.selection_bar_at(pg, x, y).expect("in the selection bar")
     };
-    let span = |h: &mut egui_kittest::Harness<'_, WordApp>, pos: &Pos| h.state_mut().session.layout().line_span(pos, 0).expect("line");
+    let span = |h: &mut H, pos: &Pos| h.state_mut().session.layout().line_span(pos, 0).expect("line");
     let button = |at: Pos2, pressed: bool| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
-    let clicks_drag = |h: &mut egui_kittest::Harness<'_, WordApp>, from: Pos2, to: Pos2, clicks: usize| {
+    let clicks_drag = |h: &mut H, from: Pos2, to: Pos2, clicks: usize| {
         h.event(Event::PointerMoved(from));
         for i in 0..clicks {
             h.event(button(from, true));
@@ -1288,7 +1736,7 @@ fn selection_bar_clicks_select_lines() {
             h.step();
         }
     };
-    let pause = |h: &mut egui_kittest::Harness<'_, WordApp>| {
+    let pause = |h: &mut H| {
         for _ in 0..40 {
             h.step();
         }
@@ -1361,7 +1809,7 @@ fn selection_bar_of_a_right_to_left_paragraph_is_on_the_right() {
     let y = c.top + c.height / 2.0;
     let right = page_to_screen(h.state_mut(), c.page, (body_x + page_w) / 2.0, y).expect("on screen");
     let left = page_to_screen(h.state_mut(), c.page, 30.0, y).expect("on screen");
-    let click = |h: &mut egui_kittest::Harness<'_, WordApp>, at: Pos2| {
+    let click = |h: &mut H, at: Pos2| {
         h.event(Event::PointerMoved(at));
         h.step();
         h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
@@ -1408,7 +1856,7 @@ fn an_armed_format_painter_changes_the_pointer() {
     let c = h.state_mut().session.layout().caret(&Pos::body(0, 6)).expect("caret");
     let over_text = page_to_screen(h.state_mut(), c.page, c.x, c.top + c.height / 2.0).expect("on screen");
     let over_bar = page_to_screen(h.state_mut(), c.page, 30.0, c.top + c.height / 2.0).expect("on screen");
-    let pointer_after = |h: &mut egui_kittest::Harness<'_, WordApp>, cmd: Option<&str>| {
+    let pointer_after = |h: &mut H, cmd: Option<&str>| {
         if let Some(cmd) = cmd {
             h.state_mut().run(cmd, json!({})).unwrap();
         }
@@ -1493,7 +1941,7 @@ fn an_empty_comment_balloon_deletes() {
         for _ in 0..6 {
             h.step();
         }
-        let click = |h: &mut egui_kittest::Harness<'_, WordApp>, at: egui::Pos2| {
+        let click = |h: &mut H, at: egui::Pos2| {
             h.event(egui::Event::PointerMoved(at));
             h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
             h.step();
@@ -2137,7 +2585,7 @@ fn double_click_margin_creates_header_and_footer() {
     for _ in 0..6 {
         h.step();
     }
-    let double_click = |h: &mut egui_kittest::Harness<'_, WordApp>, at: Pos2| {
+    let double_click = |h: &mut H, at: Pos2| {
         h.event(Event::PointerMoved(at));
         for _ in 0..2 {
             h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
@@ -2150,7 +2598,7 @@ fn double_click_margin_creates_header_and_footer() {
             h.step();
         }
     };
-    let kind = |h: &egui_kittest::Harness<'_, WordApp>| part_kind(h.state(), h.state().session.sel.focus.story);
+    let kind = |h: &H| part_kind(h.state(), h.state().session.sel.focus.story);
     let page = h.state_mut().session.layout().pages[0].clone();
     assert!(page.header_story.is_none() && page.footer_story.is_none());
     let (x, top, bottom) = (page.body.x + 20.0, page.body.y / 2.0, (page.body.bottom() + page.h) / 2.0);
@@ -2250,7 +2698,7 @@ fn double_click_switches_between_header_and_footer() {
     for _ in 0..6 {
         h.step();
     }
-    let double_click = |h: &mut egui_kittest::Harness<'_, WordApp>, at: Pos2| {
+    let double_click = |h: &mut H, at: Pos2| {
         h.event(Event::PointerMoved(at));
         for _ in 0..2 {
             h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Default::default() });
@@ -2262,7 +2710,7 @@ fn double_click_switches_between_header_and_footer() {
             h.step();
         }
     };
-    let kind = |h: &egui_kittest::Harness<'_, WordApp>| part_kind(h.state(), h.state().session.sel.focus.story);
+    let kind = |h: &H| part_kind(h.state(), h.state().session.sel.focus.story);
     let page = h.state_mut().session.layout().pages[0].clone();
     let (x, top, bottom) = (page.body.x + 20.0, page.body.y / 2.0, (page.body.bottom() + page.h) / 2.0);
     let head_at = page_to_screen(h.state_mut(), 0, x, top).expect("top margin on screen");
@@ -2556,9 +3004,8 @@ fn right_click_on_a_picture_offers_wrap_text() {
     use egui_kittest::kittest::Queryable;
     let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
     a.run("text.insert", json!({"text": "Text before the picture "})).unwrap();
-    let mut png = Vec::new();
     let img = image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255]));
-    image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    let png = wordcraft_geom::picture::encode_format(&image::DynamicImage::ImageRgba8(img).clone(), image::ImageFormat::Png).unwrap();
     a.run("insert.picture", json!({"data": wordcraft_engine::cmd::insert::base64_encode(&png), "width": 160})).unwrap();
     let pos = wordcraft_engine::cmd::objects::selected(&a.session).unwrap().0;
     a.session.sel = wordcraft_engine::Selection::caret(Pos::body(0, 0));
@@ -2886,7 +3333,7 @@ fn control_click_on_macos_opens_the_context_menu() {
     h.step();
     let ctrl = egui::Modifiers { ctrl: true, ..Default::default() };
     // The events winit delivers for a Control-click, through the app's input hook as eframe runs it.
-    let send = |h: &mut egui_kittest::Harness<'_, WordApp>, events: Vec<egui::Event>| {
+    let send = |h: &mut H, events: Vec<egui::Event>| {
         let mut raw = egui::RawInput { events, ..Default::default() };
         let ctx = h.ctx.clone();
         h.state_mut().raw_input_hook(&ctx, &mut raw);
@@ -2939,9 +3386,8 @@ fn drag_floating_picture(wrap: &str, header: bool, preselect: bool) {
             a.run("insert.editHeader", json!({})).unwrap();
         }
         a.run("text.insert", json!({"text": "The picture overlaps this line of text."})).unwrap();
-        let mut png = Vec::new();
         let img = image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255]));
-        image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let png = wordcraft_geom::picture::encode_format(&image::DynamicImage::ImageRgba8(img).clone(), image::ImageFormat::Png).unwrap();
         a.run("insert.picture", json!({"data": wordcraft_engine::cmd::insert::base64_encode(&png), "width": 160})).unwrap();
         let pos = wordcraft_engine::cmd::objects::selected(&a.session).unwrap().0;
         a.run("arrange.bounds", json!({"x": 120, "y": 80})).unwrap();
@@ -2975,7 +3421,10 @@ fn drag_floating_picture(wrap: &str, header: bool, preselect: bool) {
             for _ in 0..3 {
                 h.step();
             }
-            assert!(wordcraft_engine::cmd::objects::object_selection(&h.state().session).is_none(), "a click still selects text");
+            // In the header the picture lies over the body area, clear of the header's own text, so a
+            // click on it selects it (Word); in the body a click still reaches the text behind it.
+            let picked = wordcraft_engine::cmd::objects::object_selection(&h.state().session).is_some();
+            assert_eq!(picked, header, "a click selects the header's picture, but only edits the body's text");
             if preselect {
                 let end = Pos { off: pos.off + wordcraft_doc::para::OBJ.len_utf8(), ..pos.clone() };
                 h.state_mut().run("select.range", json!({"anchor": pos, "focus": end})).unwrap();
@@ -3140,7 +3589,7 @@ fn right_clicking_a_link_hides_the_hover_tooltip() {
     let at = screen(&mut h, c.x, c.top + c.height / 2.0);
     h.event(egui::Event::PointerMoved(at));
     steps(&mut h, 2);
-    let tips = |h: &egui_kittest::Harness<'_, WordApp>| h.query_all_by_label_contains("Click to follow link").count();
+    let tips = |h: &H| h.query_all_by_label_contains("Click to follow link").count();
     assert!(tips(&h) > 0, "hovering the link shows its target");
     for pressed in [true, false] {
         h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Secondary, pressed, modifiers: Default::default() });
@@ -3173,7 +3622,7 @@ fn a_handled_press_skips_the_link_tooltip() {
     let at = screen(&mut h, c.x, c.top + c.height / 2.0);
     h.event(Event::PointerMoved(at));
     steps(&mut h, 2);
-    let tips = |h: &egui_kittest::Harness<'_, WordApp>| h.query_all_by_label_contains("Click to follow link").count();
+    let tips = |h: &H| h.query_all_by_label_contains("Click to follow link").count();
     assert!(tips(&h) > 0, "hovering the link shows its target");
     h.event(Event::ModifiersChanged(Modifiers::COMMAND));
     h.event(Event::PointerButton { pos: at, button: PointerButton::Primary, pressed: true, modifiers: Modifiers::COMMAND });
@@ -3373,9 +3822,8 @@ fn the_context_menu_in_a_table_follows_the_selection() {
 fn right_click_on_a_picture_offers_insert_caption() {
     let mut h = table_window();
     h.state_mut().run("caret.end", json!({})).unwrap();
-    let mut png = Vec::new();
     let img = image::RgbaImage::from_pixel(40, 20, image::Rgba([30, 90, 200, 255]));
-    image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    let png = wordcraft_geom::picture::encode_format(&image::DynamicImage::ImageRgba8(img).clone(), image::ImageFormat::Png).unwrap();
     h.state_mut().run("insert.picture", json!({"data": wordcraft_engine::cmd::insert::base64_encode(&png), "width": 60})).unwrap();
     let pos = wordcraft_engine::cmd::objects::selected(&h.state().session).unwrap().0;
     h.state_mut().session.sel = wordcraft_engine::Selection::caret(Pos::body(1, 0));
@@ -3561,6 +4009,102 @@ fn table_gridlines_include_header_and_footer_tables() {
     assert_eq!(ys(Some(StoryRef::Part(1))), [10.0]);
     assert_eq!(ys(Some(StoryRef::Part(2))), [200.0]);
     assert!(ys(None).is_empty(), "closing header/footer editing removes the automatic guides");
+}
+
+/// #5967: gridlines show only where a cell has no printed border, as in Word; drawn over the
+/// border they tinted every bordered table blue.
+#[test]
+fn table_gridlines_skip_edges_a_border_draws() {
+    use wordcraft_geom::Point;
+    let cell = Placed::Cell {
+        rect: wordcraft_geom::Rect::new(0.0, 0.0, 10.0, 20.0),
+        covered: false,
+        table: Default::default(),
+        row: 0,
+        cell: 0,
+        story: StoryRef::Body,
+        clip: false,
+    };
+    let rule = |x0, y0, x1, y1, border| Placed::Rule { x0, y0, x1, y1, border };
+    let line = wordcraft_doc::props::Border::single(0.5);
+    let none = wordcraft_doc::props::Border::single(0.0);
+    let page = Page {
+        items: vec![
+            // Top border over the whole edge (run on past the corners, as layout draws it).
+            rule(-0.25, 0.0, 10.25, 0.0, line),
+            // Left border over the top half only.
+            rule(0.0, 0.0, 0.0, 10.0, line),
+            // A zero-width border draws nothing, so the right edge keeps its gridline.
+            rule(10.0, 0.0, 10.0, 20.0, none),
+            cell,
+        ],
+        ..Default::default()
+    };
+    // Overlapping rules out of order on one line leave only the gap between them: the bottom
+    // edge keeps 4..6 alone.
+    let mut gapped = page.clone();
+    gapped.items.extend([
+        rule(5.0, 20.0, 10.0, 20.0, line),
+        rule(-0.25, 20.0, 3.0, 20.0, line),
+        rule(1.0, 20.0, 4.0, 20.0, line),
+        rule(6.0, 20.0, 5.5, 20.0, line),
+    ]);
+    assert_eq!(gridline_segments(&gapped, true, None).first(), Some(&(Point::new(4.0, 20.0), Point::new(5.0, 20.0))));
+    assert_eq!(gridline_segments(&gapped, true, None).len(), 3);
+    let segs = gridline_segments(&page, true, None);
+    assert_eq!(
+        segs,
+        [
+            (Point::new(0.0, 20.0), Point::new(10.0, 20.0)), // bottom: no border
+            (Point::new(0.0, 10.0), Point::new(0.0, 20.0)),  // left: below the border
+            (Point::new(10.0, 0.0), Point::new(10.0, 20.0)), // right: invisible border
+        ]
+    );
+}
+
+/// #5967: the gridlines of a table with very many rows are found in one pass over the rules, not
+/// by re-sorting every rule on a line for each cell edge on it (a long table repainted slowly).
+#[test]
+fn table_gridlines_of_a_many_row_table_are_fast() {
+    const ROWS: usize = 30_000;
+    let line = wordcraft_doc::props::Border::single(0.5);
+    let mut items = Vec::new();
+    for i in 0..ROWS {
+        let y = i as f32 * 10.0;
+        items.push(Placed::Cell {
+            rect: wordcraft_geom::Rect::new(0.0, y, 10.0, 10.0),
+            covered: false,
+            table: Default::default(),
+            row: i,
+            cell: 0,
+            story: StoryRef::Body,
+            clip: false,
+        });
+        // One border piece per row on each side, so both vertical lines carry a rule per row.
+        for x in [0.0, 10.0] {
+            items.push(Placed::Rule { x0: x, y0: y, x1: x, y1: y + 10.0, border: line });
+        }
+    }
+    let page = Page { items, ..Default::default() };
+    let start = std::time::Instant::now();
+    let segs = gridline_segments(&page, true, None);
+    // Both sides are covered; the top and bottom of every cell are not.
+    assert_eq!(segs.len(), 2 * ROWS);
+    assert!(segs.iter().all(|(a, b)| a.y == b.y));
+    assert!(start.elapsed() < std::time::Duration::from_secs(5), "took {:?}", start.elapsed());
+}
+
+/// #5967: a new table has borders on every edge, so it shows no gridline at all; with its
+/// borders removed every edge shows one.
+#[test]
+fn a_bordered_table_shows_no_gridlines() {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
+    a.run("insert.table", json!({"rows": 2, "cols": 3})).unwrap();
+    assert!(a.session.view.table_gridlines, "View Gridlines is on by default");
+    let segs = |a: &mut WordApp| gridline_segments(&a.session.layout().pages[0], true, None).len();
+    assert_eq!(segs(&mut a), 0);
+    a.run("table.borders", json!({"kind": "none"})).unwrap();
+    assert_eq!(segs(&mut a), 6 * 4, "every edge of the six cells");
 }
 
 #[test]
@@ -4032,13 +4576,13 @@ fn ruler_tab_gestures_are_primary_only_and_cancellable() {
         h.step();
     }
     let area = h.state().canvas.canvas_rect.expect("the canvas is laid out");
-    let ruler_x = |h: &mut egui_kittest::Harness<'_, WordApp>, d: f32| {
+    let ruler_x = |h: &mut H, d: f32| {
         let body_x = h.state_mut().session.layout().pages[0].body.x;
         page_to_screen(h.state_mut(), 0, body_x + d, 0.0).expect("on screen").x
     };
-    let on_ruler = |h: &mut egui_kittest::Harness<'_, WordApp>, d: f32| pos2(ruler_x(h, d), area.min.y - 7.0);
+    let on_ruler = |h: &mut H, d: f32| pos2(ruler_x(h, d), area.min.y - 7.0);
     let button = |at: Pos2, b: PointerButton, pressed: bool| Event::PointerButton { pos: at, button: b, pressed, modifiers: Default::default() };
-    let drag_events = |h: &mut egui_kittest::Harness<'_, WordApp>, from: Pos2, to: Pos2, b: PointerButton| {
+    let drag_events = |h: &mut H, from: Pos2, to: Pos2, b: PointerButton| {
         h.event(Event::PointerMoved(from));
         h.event(button(from, b, true));
         h.step();
@@ -4051,7 +4595,7 @@ fn ruler_tab_gestures_are_primary_only_and_cancellable() {
             h.step();
         }
     };
-    let stops_of = |h: &egui_kittest::Harness<'_, WordApp>, block: usize| {
+    let stops_of = |h: &H, block: usize| {
         let s = &h.state().session;
         let para = s.doc.para_at(&Pos::body(block, 0)).expect("a paragraph");
         s.doc.styles.resolve_para(&para.props).tabs.iter().map(|t| (t.pos, t.align)).collect::<Vec<_>>()
@@ -4137,13 +4681,13 @@ fn ruler_tab_stops_are_set_moved_and_cleared_with_the_pointer() {
     }
     let area = h.state().canvas.canvas_rect.expect("the canvas is laid out");
     // The middle of the ruler's strip, over a point `d` points from the paragraph's start.
-    let on_ruler = |h: &mut egui_kittest::Harness<'_, WordApp>, d: f32| {
+    let on_ruler = |h: &mut H, d: f32| {
         let body_x = h.state_mut().session.layout().pages[0].body.x;
         let x = page_to_screen(h.state_mut(), 0, body_x + d, 0.0).expect("on screen").x;
         pos2(x, area.min.y - 7.0)
     };
     let button = |at: Pos2, pressed: bool| Event::PointerButton { pos: at, button: PointerButton::Primary, pressed, modifiers: Default::default() };
-    let click = |h: &mut egui_kittest::Harness<'_, WordApp>, at: Pos2| {
+    let click = |h: &mut H, at: Pos2| {
         h.event(Event::PointerMoved(at));
         h.event(button(at, true));
         h.step();
@@ -4156,7 +4700,7 @@ fn ruler_tab_stops_are_set_moved_and_cleared_with_the_pointer() {
             h.step();
         }
     };
-    let drag = |h: &mut egui_kittest::Harness<'_, WordApp>, from: Pos2, to: Pos2| {
+    let drag = |h: &mut H, from: Pos2, to: Pos2| {
         h.event(Event::PointerMoved(from));
         h.event(button(from, true));
         h.step();
@@ -4169,7 +4713,7 @@ fn ruler_tab_stops_are_set_moved_and_cleared_with_the_pointer() {
             h.step();
         }
     };
-    let stops = |h: &egui_kittest::Harness<'_, WordApp>| {
+    let stops = |h: &H| {
         let s = &h.state().session;
         let para = s.doc.para_at(&s.sel.focus).expect("a paragraph");
         s.doc.styles.resolve_para(&para.props).tabs.iter().map(|t| (t.pos, t.align)).collect::<Vec<_>>()
@@ -4234,6 +4778,132 @@ fn hiding_white_space_stacks_page_bands_and_keeps_hit_testing() {
     let _ = collapse_white_space(&[], &[], 1.0, 1.0);
 }
 
+/// A Japanese, Chinese or Korean composition is drawn with the CJK UI font, as the window
+/// caption is. It borrowed a document face instead, but only one of 16 MB or less, and on
+/// Windows Japanese falls back to Microsoft YaHei (19 MB): without craft-fonts' CJK faces
+/// built in, the composition was a box until it was committed.
+#[test]
+fn a_cjk_composition_uses_the_cjk_ui_font() {
+    let app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
+    // The frame the composition arrives in draws it before the CJK UI font is installed.
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_step_dt(1.0 / 60.0)
+        .with_context_setup(kana_test_glyphs)
+        .build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+    for _ in 0..8 {
+        h.step();
+    }
+    assert!(h.state().canvas.focused, "the canvas takes focus when the window opens");
+    assert!(!h.state().want_system_cjk, "nothing CJK on screen yet");
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "にほん".into(), active_range_chars: None }));
+    for _ in 0..3 {
+        h.step();
+    }
+    assert_eq!(h.state().canvas.ime_preedit, "にほん");
+    assert!(h.state().want_system_cjk, "kana ask for the CJK UI font");
+    assert!(h.state().fonts_system_cjk, "and the interface fonts are installed with it");
+    assert!(!h.state().canvas.ime_faces.iter().any(|f| f.covers('に')), "no document face is borrowed for it");
+}
+
+/// The composition is drawn in the font and size of the text it goes into, as Word draws it.
+/// It was drawn in the interface font at 0.8 of the line's height, which made Latin letters look
+/// larger and heavier than the same letters once committed.
+#[test]
+fn the_composition_takes_the_documents_font_and_size() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
+    app.run("document.setText", json!({"text": "Hello"})).unwrap();
+    app.run("select.all", json!({})).unwrap();
+    app.run("format.size", json!({"size": 20})).unwrap();
+    app.run("caret.docEnd", json!({})).unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    for _ in 0..8 {
+        h.step();
+    }
+    let layout = h.state_mut().session.layout();
+    let (run, base) = layout.typing_style(&h.state().session.sel.focus, 0).expect("the run text typed here takes");
+    assert_eq!(run.size, 20.0, "the size of the text before the caret");
+    let caret = layout.caret(&h.state().session.sel.focus).expect("a caret");
+    assert!(base > caret.top && base < caret.top + caret.height, "the baseline lies within the caret: {base} in {caret:?}");
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "tottori".into(), active_range_chars: None }));
+    for _ in 0..3 {
+        h.step();
+    }
+    assert!(h.state().canvas.ime_face == Some(run.requested_face), "the composition takes that face");
+    let family = crate::theme::composition_family(h.state().windows.shown());
+    let first = h.ctx.fonts(|f| f.definitions().families.get(&family).and_then(|v| v.first().cloned()));
+    assert!(first.as_deref().is_some_and(|n| n.starts_with("composition ") && n.contains(run.requested_face.family.as_str())), "{first:?}");
+    // As drawn: at the text's size on screen, its first baseline on the line's. The caret's IME
+    // rectangle gives the caret's top and the page's scale on screen.
+    let ime = h.output().platform_output.ime.as_ref().map(|i| i.rect).expect("the caret's IME rectangle");
+    let scale = ime.height() / caret.height;
+    let drawn = h
+        .output()
+        .shapes
+        .iter()
+        .find_map(|c| match &c.shape {
+            egui::Shape::Text(t) if t.galley.text() == "tottori" => Some(t.clone()),
+            _ => None,
+        })
+        .expect("the composition is drawn");
+    let size = drawn.galley.job.sections.first().map(|s| s.format.font_id.size);
+    assert!(size.is_some_and(|s| (s - 20.0 * scale).abs() < 0.01), "{size:?} at scale {scale}");
+    let row = drawn.galley.rows.first().expect("a row");
+    let baseline = drawn.pos.y + row.pos.y + row.glyphs.first().expect("a glyph").pos.y;
+    let want = ime.min.y + (base - caret.top) * scale;
+    assert!((baseline - want).abs() < 0.5, "drawn baseline {baseline}, the line's {want}");
+    // A composition isn't text until it is committed.
+    assert_eq!(h.state().session.doc.plain_text(StoryRef::Body), "Hello");
+}
+
+/// The composition's size never panics egui, which draws each glyph into its font atlas and
+/// panics on one wider than the atlas. In 1,638-point text at 500% the text's size is about
+/// 11,000 points, so the composition is drawn smaller.
+#[test]
+fn a_composition_at_the_largest_size_and_zoom_is_drawn_smaller() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
+    app.run("document.setText", json!({"text": "W"})).unwrap();
+    app.run("select.all", json!({})).unwrap();
+    app.run("format.size", json!({"size": 1638})).unwrap();
+    app.run("caret.docEnd", json!({})).unwrap();
+    app.run("view.zoom", json!({"value": 500})).unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        app,
+    );
+    for _ in 0..8 {
+        h.step();
+    }
+    h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "WWW".into(), active_range_chars: None }));
+    for _ in 0..3 {
+        h.step();
+    }
+    let size = h.output().shapes.iter().find_map(|c| match &c.shape {
+        egui::Shape::Text(t) if t.galley.text() == "WWW" => t.galley.job.sections.first().map(|s| s.format.font_id.size),
+        _ => None,
+    });
+    let most = h.ctx.input(|i| i.max_texture_side) as f32 / 4.0 / h.ctx.pixels_per_point();
+    assert!(size.is_some_and(|s| s > 1.0 && s <= most), "{size:?}, at most {most}");
+}
+
 /// #1169: Space and Enter count as `Response::clicked` on the focused canvas, and
 /// `request_focus` always interrupts IME. On X11 that recreates the XIM context and
 /// fcitx drops every later key. Those keys still type, and they must not set
@@ -4256,8 +4926,7 @@ fn space_and_enter_on_the_canvas_do_not_interrupt_ime() {
     }
     assert!(h.state().canvas.focused, "the canvas takes focus when the window opens");
     let key = |key| egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers: egui::Modifiers::NONE };
-    let ime_interrupted =
-        |h: &egui_kittest::Harness<'_, WordApp>| h.output().platform_output.ime.as_ref().map(|ime| ime.should_interrupt_composition);
+    let ime_interrupted = |h: &H| h.output().platform_output.ime.as_ref().map(|ime| ime.should_interrupt_composition);
     h.event(key(egui::Key::Space));
     h.event(egui::Event::Text(" ".into()));
     h.step();
@@ -4285,11 +4954,14 @@ fn space_and_enter_on_the_canvas_do_not_interrupt_ime() {
 /// Kittest's `MissingGlyphPolicy::Panic` is right: a missing glyph is a bug. But the interface
 /// fonts need not carry Japanese (craft-fonts is optional, and a CI Linux runner has no
 /// Japanese system font), and these IME tests compose Japanese through the interface font
-/// chain. Draw a stand-in for exactly those characters; every other missing glyph still panics.
+/// chain, or a window's composition family (the document's face, then that chain). Draw a
+/// stand-in for exactly those characters; every other missing glyph still panics.
 fn kana_test_glyphs(ctx: &egui::Context) {
     ctx.add_glyph_rasterizer(egui::GlyphRasterizer::new("wordcraft::canvas::tests::kana", |req| {
-        let kana =
-            *req.family == egui::FontFamily::Proportional && !req.cluster.is_empty() && req.cluster.chars().all(|c| matches!(c, 'に' | 'ほ' | 'ん'));
+        let composition = matches!(req.family, egui::FontFamily::Name(n) if n.starts_with("composition "));
+        let kana = (*req.family == egui::FontFamily::Proportional || composition)
+            && !req.cluster.is_empty()
+            && req.cluster.chars().all(|c| matches!(c, 'に' | 'ほ' | 'ん'));
         kana.then(|| egui::RasterizedGlyph {
             bitmap: egui::GlyphBitmap {
                 image: egui::ColorImage::new([1, 1], vec![egui::Color32::WHITE]),
@@ -4322,8 +4994,8 @@ fn the_ime_fixture_draws_kana_without_a_japanese_font() {
 }
 
 /// While an input method composes, the caret and the candidate window sit at its cursor inside
-/// the composition: the end of the range it reports, or the end of the text with no range. The
-/// range comes from the OS and is clamped, whatever it holds.
+/// the composition: the end of the range it reports, or the end of the text when it never reports
+/// a range. The range comes from the OS and is clamped, whatever it holds.
 #[test]
 fn the_caret_follows_the_input_method_cursor_in_the_composition() {
     let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
@@ -4343,7 +5015,7 @@ fn the_caret_follows_the_input_method_cursor_in_the_composition() {
     for _ in 0..8 {
         h.step();
     }
-    let ime_x = |h: &egui_kittest::Harness<'_, WordApp>| h.output().platform_output.ime.as_ref().map(|ime| ime.cursor_rect.min.x);
+    let ime_x = |h: &H| h.output().platform_output.ime.as_ref().map(|ime| ime.cursor_rect.min.x);
     let start = ime_x(&h).expect("the canvas places the candidate window");
     let mut compose = |range: Option<std::ops::Range<usize>>| {
         h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "にほん".into(), active_range_chars: range }));
@@ -4353,9 +5025,10 @@ fn the_caret_follows_the_input_method_cursor_in_the_composition() {
     };
     let before = compose(Some(0..0));
     assert_eq!(before, start, "a cursor at the composition's start is the caret before composing");
-    let end = compose(None);
     let mid = compose(Some(1..1));
+    let end = compose(Some(3..3));
     assert!(end > mid && mid > before, "the cursor moves through the composition: {before} {mid} {end}");
+    assert_eq!(compose(None), before, "Windows collapses 0..0 to None: the caret stays at the start");
     assert_eq!(compose(Some(0..99)), end, "a range past the text ends at its end");
     assert_eq!(compose(Some(std::ops::Range { start: 5, end: 1 })), mid, "a reversed range uses its end");
     assert_eq!(compose(Some(usize::MAX..usize::MAX)), end);
@@ -4363,6 +5036,99 @@ fn the_caret_follows_the_input_method_cursor_in_the_composition() {
     h.step();
     assert_eq!(h.state().canvas.ime_preedit_range, None, "the commit clears the range");
     assert!(h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body).contains("にほん"));
+}
+
+/// #6916: egui-winit turns a Windows `0..0` cursor range into `None` (a Korean IME workaround).
+/// Moving left through a pinyin pre-edit used to jump from before the first letter to after the
+/// last one, then get stuck; moving right jumped back to the first letter. A composition that
+/// never reported a cursor still starts at its end.
+#[test]
+fn moving_left_inside_a_composition_stops_at_its_start() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
+    app.run("document.setText", json!({"text": "The"})).unwrap();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_context_setup(kana_test_glyphs)
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+    for _ in 0..8 {
+        h.step();
+    }
+    let ime_x = |h: &H| h.output().platform_output.ime.as_ref().map(|ime| ime.cursor_rect.min.x);
+    let start = ime_x(&h).expect("the canvas places the candidate window");
+    let mut compose = |text: &str, range: Option<std::ops::Range<usize>>| {
+        h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: text.into(), active_range_chars: range }));
+        h.step();
+        h.step();
+        ime_x(&h).expect("the canvas places the candidate window")
+    };
+    let x4 = compose("abcd", Some(4..4));
+    let x3 = compose("abcd", Some(3..3));
+    let x2 = compose("abcd", Some(2..2));
+    let x1 = compose("abcd", Some(1..1));
+    assert!(x4 > x3 && x3 > x2 && x2 > x1 && x1 > start, "left presses walk the caret through the pre-edit: {start} {x1} {x2} {x3} {x4}");
+    // The fourth left press reaches 0, which Windows reports as no range at all.
+    assert_eq!(compose("abcd", None), start, "the caret sits before the first letter, not after the last");
+    assert_eq!(compose("abcd", None), start, "another left press leaves it at the start");
+    assert_eq!(compose("abcd", Some(1..1)), x1, "a right press moves it to the first letter again");
+    // A fresh composition with no cursor hint still puts the caret at its end.
+    let fresh = compose("xy", None);
+    assert!(fresh > start, "a composition that never reported a cursor keeps the end fallback: {start} {fresh}");
+    assert_eq!(h.state().canvas.ime_preedit_range, None);
+}
+
+/// #6916: deleting inside a composition changes its text but can leave the IME cursor at 0,
+/// which Windows reports as `0..0` -> `None`. A bare `None` must not fall back to the end: the
+/// caret would jump after the last letter, ignore Left, and jump back to the first on Right.
+#[test]
+fn deleting_at_the_start_of_a_composition_keeps_its_caret_at_the_start() {
+    let mut app = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
+    app.run("document.setText", json!({"text": "The"})).unwrap();
+    let mut h = egui_kittest::Harness::builder()
+        .with_size(egui::vec2(1440.0, 900.0))
+        .with_context_setup(kana_test_glyphs)
+        .with_step_dt(1.0 / 60.0)
+        .build_ui_state(
+            |ui, app: &mut WordApp| {
+                let ctx = ui.ctx().clone();
+                app.logic(&ctx);
+                app.ui(ui);
+            },
+            app,
+        );
+    for _ in 0..8 {
+        h.step();
+    }
+    let ime_x = |h: &H| h.output().platform_output.ime.as_ref().map(|ime| ime.cursor_rect.min.x);
+    let start = ime_x(&h).expect("the canvas places the candidate window");
+    let mut compose = |text: &str, range: Option<std::ops::Range<usize>>| {
+        h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: text.into(), active_range_chars: range }));
+        h.step();
+        h.step();
+        ime_x(&h).expect("the canvas places the candidate window")
+    };
+
+    // Backspace-like edit: the cursor was after the first letter, the letter before it is gone,
+    // so the new pre-edit is the tail of the old one and the caret is now at its start.
+    let x1 = compose("abcd", Some(1..1));
+    assert!(x1 > start);
+    assert_eq!(compose("bcd", None), start, "deleting before the cursor moves it to the pre-edit's start");
+    assert_eq!(compose("bcd", None), start, "Left at the start still stays there");
+    assert!(compose("bcd", Some(1..1)) > start, "Right moves to the first remaining letter");
+
+    // Delete at an already-start cursor: the text changes, the cursor stays at 0, and Windows
+    // sends no range again.
+    compose("bcd", None);
+    assert_eq!(compose("cd", None), start, "deleting the first letter keeps the caret at the start");
+    assert_eq!(compose("cd", None), start, "and Left cannot move past it");
+    assert!(compose("cd", Some(1..1)) > start, "Right still walks into the remaining text");
 }
 
 /// The outgoing IME descriptor is built from settled, visible logical text. A pre-edit does
@@ -4389,10 +5155,8 @@ fn ime_descriptor_reports_visible_logical_text_and_exact_cause() {
     }
     h.state_mut().session.sel = wordcraft_engine::Selection::caret(wordcraft_doc::Pos::body(0, 2));
     h.step();
-    let text = |h: &egui_kittest::Harness<'_, WordApp>| {
-        h.output().platform_output.ime.as_ref().and_then(|i| i.surrounding_text.available()).map(|p| p.text.clone())
-    };
-    let cause = |h: &egui_kittest::Harness<'_, WordApp>| h.output().platform_output.ime.as_ref().map(|i| i.change_cause);
+    let text = |h: &H| h.output().platform_output.ime.as_ref().and_then(|i| i.surrounding_text.available()).map(|p| p.text.clone());
+    let cause = |h: &H| h.output().platform_output.ime.as_ref().map(|i| i.change_cause);
     assert_eq!(text(&h), Some("ab".into()), "the committed text is available");
     h.event(egui::Event::Ime(egui::ImeEvent::Preedit { text: "に".into(), active_range_chars: None }));
     h.step();
@@ -4436,8 +5200,7 @@ fn ime_descriptor_hides_tracked_deletions_and_preserves_reversed_selection() {
     }
     h.state_mut().session.sel = wordcraft_engine::Selection { anchor: wordcraft_doc::Pos::body(0, 2), focus: wordcraft_doc::Pos::body(0, 7) };
     h.step();
-    let payload =
-        |h: &egui_kittest::Harness<'_, WordApp>| h.output().platform_output.ime.as_ref().and_then(|i| i.surrounding_text.available()).cloned();
+    let payload = |h: &H| h.output().platform_output.ime.as_ref().and_then(|i| i.surrounding_text.available()).cloned();
     let p = payload(&h).expect("the visible text is available");
     assert_eq!(p.text, "abcd");
     assert_eq!(p.cursor, 4);
@@ -4463,10 +5226,10 @@ fn ime_byte_deletion_preserves_the_selection_and_earns_input_method() {
     }
     h.state_mut().session.sel = wordcraft_engine::Selection { anchor: wordcraft_doc::Pos::body(0, 3), focus: wordcraft_doc::Pos::body(0, 1) };
     h.step();
-    let cause = |h: &egui_kittest::Harness<'_, WordApp>| h.output().platform_output.ime.as_ref().map(|i| i.change_cause);
+    let cause = |h: &H| h.output().platform_output.ime.as_ref().map(|i| i.change_cause);
     h.event(egui::Event::Ime(egui::ImeEvent::DeleteSurroundingBytes { before_bytes: 1, after_bytes: 1 }));
     h.step();
-    let body = |h: &egui_kittest::Harness<'_, WordApp>| h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body).trim_end().to_string();
+    let body = |h: &H| h.state().session.doc.plain_text(wordcraft_doc::StoryRef::Body).trim_end().to_string();
     assert_eq!(body(&h), "bc", "the selected text is preserved");
     assert_eq!(h.state().session.sel.anchor.off, 2, "the selection anchor moved with the erased prefix");
     assert_eq!(h.state().session.sel.focus.off, 0);
@@ -4513,7 +5276,7 @@ fn ime_generation_changes_on_document_replacement_but_not_on_caret_motion() {
     for _ in 0..8 {
         h.step();
     }
-    let generation = |h: &egui_kittest::Harness<'_, WordApp>| h.output().platform_output.ime.as_ref().map(|i| i.context_generation);
+    let generation = |h: &H| h.output().platform_output.ime.as_ref().map(|i| i.context_generation);
     let first = generation(&h).expect("an IME context");
     h.state_mut().run("caret.right", json!({})).unwrap();
     h.step();
@@ -4718,7 +5481,7 @@ fn ime_generation_changes_on_undo_and_version_restore() {
     for _ in 0..8 {
         h.step();
     }
-    let generation = |h: &egui_kittest::Harness<'_, WordApp>| h.output().platform_output.ime.as_ref().map(|i| i.context_generation);
+    let generation = |h: &H| h.output().platform_output.ime.as_ref().map(|i| i.context_generation);
     let first = generation(&h).expect("an IME context");
     h.state_mut().run("edit.undo", json!({})).unwrap();
     h.step();
@@ -5017,9 +5780,7 @@ fn ime_equation_byte_delete_drops_only_its_immediate_replacement() {
     for _ in 0..8 {
         h.step();
     }
-    let linear = |h: &mut egui_kittest::Harness<'_, WordApp>| {
-        h.state_mut().run("equation.get", json!({})).unwrap()["linear"].as_str().unwrap_or_default().to_string()
-    };
+    let linear = |h: &mut H| h.state_mut().run("equation.get", json!({})).unwrap()["linear"].as_str().unwrap_or_default().to_string();
     // Harness::event steps each queued event in a separate frame. Insert the complete
     // protocol replacement into RawInput to exercise a single native input batch.
     h.input_mut().events.extend([
@@ -5391,6 +6152,176 @@ fn a_long_comment_balloon_paints_only_its_first_ten_rows() {
     }
 }
 
+/// A Behind Text header picture: while editing the header a click on it selects it wherever no
+/// header text covers it (far down over the body, or in the band clear of the text), as in Word;
+/// over the header text the click edits the text. From the body a click there is body text.
+#[test]
+fn header_picture_clear_of_header_text_is_selected_while_editing_the_header() {
+    // Far down the page, over the body.
+    header_picture_click(false, 200.0, 400.0, Some((300.0, f32::MAX)), true);
+    // In the header band, below the header's text line.
+    header_picture_click(false, 300.0, 56.0, Some((50.0, 72.0)), true);
+    // Over the header's text, at its start: the click goes to the text.
+    header_picture_click(false, 72.0, 36.0, None, false);
+}
+
+/// The same for a footer, which is a `StoryRef::Part` like the header.
+#[test]
+fn footer_picture_clear_of_footer_text_is_selected_while_editing_the_footer() {
+    header_picture_click(true, 200.0, 400.0, Some((300.0, f32::MAX)), true);
+}
+
+/// Dragging a header picture that no header text covers moves it, rather than starting the
+/// deferred drag-over-text path.
+#[test]
+fn dragging_a_header_picture_clear_of_header_text_moves_it() {
+    let (mut h, pos, rect) = header_picture_app(false, 200.0, 400.0, 1);
+    edit_story(&mut h, false, 0);
+    let at = picture_point(&h, 0, rect);
+    h.event(egui::Event::PointerMoved(at));
+    h.event(pointer_button(at, egui::PointerButton::Primary, true));
+    h.step();
+    let to = at + egui::vec2(60.0, 30.0);
+    for p in [at + egui::vec2(20.0, 10.0), to] {
+        h.event(egui::Event::PointerMoved(p));
+        h.step();
+    }
+    h.event(pointer_button(to, egui::PointerButton::Primary, false));
+    steps(&mut h, 3);
+    let moved = h.state_mut().session.layout().object(&pos, 0).unwrap().rect;
+    assert!(moved.x > rect.x + 10.0 && moved.y > rect.y + 5.0, "the picture moved with the drag: {rect:?} -> {moved:?}");
+    assert_eq!(wordcraft_engine::cmd::objects::object_selection(&h.state().session).map(|(p, _)| p), Some(pos), "and stays selected");
+}
+
+/// A right-click on the header picture repeated on page 2 while editing the header on page 1
+/// selects that copy: the frame and handles belong on page 2, not the page last edited.
+#[test]
+fn right_clicking_a_repeated_header_picture_selects_it_on_its_own_page() {
+    let (mut h, pos, _) = header_picture_app(false, 200.0, 400.0, 2);
+    edit_story(&mut h, false, 0);
+    assert_eq!(h.state().session.page_hint, 0, "editing the header on page 1");
+    let rect = h.state_mut().session.layout().object(&pos, 1).unwrap().rect;
+    assert_eq!(h.state_mut().session.layout().object(&pos, 1).unwrap().page, 1, "the picture is repeated on page 2");
+    let at = picture_point(&h, 1, rect);
+    press(&mut h, at, egui::PointerButton::Secondary);
+    assert_eq!(wordcraft_engine::cmd::objects::object_selection(&h.state().session).map(|(p, _)| p), Some(pos), "the right-click selected it");
+    assert_eq!(h.state().session.page_hint, 1, "its frame is drawn on the page clicked");
+}
+
+/// The same for a left-click: it selects the page-2 copy and moves the frame there, not the copy
+/// on page 1 that was being edited.
+#[test]
+fn left_clicking_a_repeated_header_picture_selects_it_on_its_own_page() {
+    let (mut h, pos, _) = header_picture_app(false, 200.0, 400.0, 2);
+    edit_story(&mut h, false, 0);
+    assert_eq!(h.state().session.page_hint, 0, "editing the header on page 1");
+    let rect = h.state_mut().session.layout().object(&pos, 1).unwrap().rect;
+    assert_eq!(h.state_mut().session.layout().object(&pos, 1).unwrap().page, 1, "the picture is repeated on page 2");
+    let at = picture_point(&h, 1, rect);
+    press(&mut h, at, egui::PointerButton::Primary);
+    assert_eq!(wordcraft_engine::cmd::objects::object_selection(&h.state().session).map(|(p, _)| p), Some(pos), "the left-click selected it");
+    assert_eq!(h.state().session.page_hint, 1, "its frame is drawn on the page clicked");
+}
+
+fn pointer_button(pos: egui::Pos2, button: egui::PointerButton, pressed: bool) -> egui::Event {
+    egui::Event::PointerButton { pos, button, pressed, modifiers: Default::default() }
+}
+
+/// Moves to `at`, presses and releases `button` there and lets the frames settle.
+fn press(h: &mut H, at: egui::Pos2, button: egui::PointerButton) {
+    h.event(egui::Event::PointerMoved(at));
+    h.event(pointer_button(at, button, true));
+    h.step();
+    h.event(pointer_button(at, button, false));
+    steps(h, 3);
+}
+
+/// Near the top-left corner of the picture's `rect` on `page`: on the header text line when the
+/// picture is placed over it.
+fn picture_point(h: &H, page: usize, rect: wordcraft_geom::Rect) -> egui::Pos2 {
+    let scale = h.state().canvas.scale;
+    crate::frame::to_screen(h.state().canvas.page_rects[page], scale, rect).min + egui::vec2(10.0, 6.0) * scale
+}
+
+/// Starts editing the header (or footer) of `page` and lets the frames settle.
+fn edit_story(h: &mut H, footer: bool, page: usize) {
+    let command = if footer { "insert.editFooter" } else { "insert.editHeader" };
+    h.state_mut().run(command, json!({"page": page})).unwrap();
+    // Entering the footer scrolls the page to it: wait until the page stops moving.
+    let (mut last, mut still) = (h.state().canvas.page_rects[0], 0);
+    for _ in 0..600 {
+        h.step();
+        let now = h.state().canvas.page_rects[0];
+        still = if now == last { still + 1 } else { 0 };
+        last = now;
+        if still >= 10 {
+            break;
+        }
+    }
+}
+
+/// A body-mode window on a document of `pages` pages whose header (or footer) holds text and a
+/// 160pt Behind Text picture at (`x`, `y`) on the page. Returns it, the picture's position and
+/// its first-page rectangle.
+fn header_picture_app(footer: bool, x: f32, y: f32, pages: usize) -> (H, Pos, wordcraft_geom::Rect) {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), Default::default());
+    for _ in 1..pages {
+        a.run("insert.pageBreak", json!({})).unwrap();
+    }
+    a.run(if footer { "insert.editFooter" } else { "insert.editHeader" }, json!({})).unwrap();
+    a.run("text.insert", json!({"text": if footer { "Footer" } else { "Header" }})).unwrap();
+    let mut png = Vec::new();
+    let img = image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255]));
+    image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+    a.run("insert.picture", json!({"data": wordcraft_engine::cmd::insert::base64_encode(&png), "width": 160})).unwrap();
+    let pos = wordcraft_engine::cmd::objects::selected(&a.session).unwrap().0;
+    a.run("arrange.bounds", json!({"x": x, "y": y})).unwrap();
+    a.run("arrange.wrap", json!({"wrap": "behindText"})).unwrap();
+    let rect = a.session.layout().object(&pos, 0).unwrap().rect;
+    a.run("insert.closeHeader", json!({})).unwrap();
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).with_step_dt(1.0 / 60.0).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        a,
+    );
+    // Zoomed out so the whole page is on screen and entering the footer scrolls nothing.
+    h.state_mut().run("view.zoom", json!({"value": 40})).unwrap();
+    steps(&mut h, 20);
+    (h, pos, rect)
+}
+
+/// Puts a Behind Text header (or footer) picture at (`x`, `y`), checks its top lies within `band`
+/// (when given), clicks near its top-left corner from the body and then while editing, and checks
+/// the second click selects it (`selects`) or leaves the caret in the text; a right-click picks it
+/// only where the click does, so the context menu (Reset Picture, Wrap Text) acts on it.
+fn header_picture_click(footer: bool, x: f32, y: f32, band: Option<(f32, f32)>, selects: bool) {
+    let (mut h, pos, rect) = header_picture_app(footer, x, y, 1);
+    if let Some((lo, hi)) = band {
+        assert!(rect.y >= lo && rect.y < hi, "the picture sits where the case wants it: {rect:?}");
+    }
+    let at = picture_point(&h, 0, rect);
+    let picked = |h: &H| wordcraft_engine::cmd::objects::object_selection(&h.state().session).map(|(p, _)| p);
+    press(&mut h, at, egui::PointerButton::Primary);
+    assert!(picked(&h).is_none(), "from the body the picture isn't selectable");
+    assert_eq!(h.state().session.sel.focus.story, StoryRef::Body);
+    edit_story(&mut h, footer, 0);
+    press(&mut h, at, egui::PointerButton::Primary);
+    if selects {
+        assert_eq!(picked(&h), Some(pos.clone()), "while editing a click on its picture selects it ({x}, {y})");
+    } else {
+        assert_eq!(picked(&h), None, "over the text the click edits the text ({x}, {y})");
+        assert!(matches!(h.state().session.sel.focus.story, StoryRef::Part(_)), "still in the header or footer");
+    }
+    h.state_mut().session.sel = wordcraft_engine::Selection::caret(Pos { off: 0, ..pos.clone() });
+    press(&mut h, at, egui::PointerButton::Secondary);
+    assert_eq!(picked(&h), selects.then(|| pos.clone()), "a right-click picks the picture only where a click does ({x}, {y})");
+    h.event(egui::Event::Key { key: egui::Key::Escape, physical_key: None, pressed: true, repeat: false, modifiers: Default::default() });
+    h.step();
+}
+
 /// #1961 review: what a picture draws must be in its page's fingerprint itself. Reset Picture on
 /// one never edited keeps its media and clears only its corrections and crop, and undo puts them
 /// back; the anchor paragraph's layout pointer also moves then, but only as long as the old
@@ -5457,9 +6388,8 @@ fn a_picture_linked_from_its_context_menu_shows_and_follows_its_link() {
         a.run("select.text", json!({"text": "before"})).unwrap();
         a.run("insert.bookmark", json!({"name": "Spot"})).unwrap();
         a.run("caret.docEnd", json!({})).unwrap();
-        let mut png = Vec::new();
         let img = image::RgbaImage::from_pixel(40, 20, image::Rgba([200, 30, 30, 255]));
-        image::DynamicImage::ImageRgba8(img).write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png).unwrap();
+        let png = wordcraft_geom::picture::encode_format(&image::DynamicImage::ImageRgba8(img).clone(), image::ImageFormat::Png).unwrap();
         a.run("insert.picture", json!({"data": wordcraft_engine::cmd::insert::base64_encode(&png), "width": 160})).unwrap();
         if floating {
             a.run("arrange.wrap", json!({"wrap": "inFrontOfText"})).unwrap();

@@ -63,9 +63,9 @@ pub use navigation::{nearest_page, page_at, page_to_screen};
 use navigation::{scrollbar_page_tip, viewed_page};
 #[cfg(test)]
 use pages::{DRAWING_GRID_MAX_LINES, DRAWING_GRID_MIN_PX};
-pub(crate) use pages::{PageKeys, dark_page, page_doc, page_screen_scale, preview_sel, screen_render_options};
+pub(crate) use pages::{PageKeys, dark_page, page_doc, page_screen_scale, preview_sel, screen_render_options, shown_doc, shown_sel};
 use pages::{
-    drawing_grid, drawing_grid_step, gridline_cells, page_image, page_key, page_render_options, page_shows, shown_layout, texel_aligned_rect,
+    drawing_grid, drawing_grid_step, gridline_segments, page_image, page_key, page_render_options, page_shows, shown_layout, texel_aligned_rect,
     view_key, visible_tiles,
 };
 use pdf::{pdf_mouse, pdf_paint_overlay};
@@ -128,6 +128,33 @@ impl PdfSelection {
     pub fn ends(&self) -> ((usize, usize), (usize, usize)) {
         if self.anchor <= self.focus { (self.anchor, self.focus) } else { (self.focus, self.anchor) }
     }
+}
+
+/// One frame's laid-out input-method composition. The pre-edit is inserted into a document copy so
+/// the text to its right reflows right, and the caret is placed at the input method's cursor inside
+/// it. Held with the inputs that produced it so an idle frame reuses the layout.
+pub(crate) struct ImePreview {
+    pub(super) preedit: String,
+    pub(super) cursor_chars: usize,
+    pub(super) document: u64,
+    pub(super) rev: u64,
+    pub(super) real_sel: wordcraft_engine::Selection,
+    pub(super) base: std::sync::Arc<DocLayout>,
+    pub(super) doc: wordcraft_doc::Document,
+    pub(super) sel: wordcraft_engine::Selection,
+    pub(super) layout: std::sync::Arc<DocLayout>,
+}
+
+/// The replacement a platform can still deliver for a composition a pointer press discarded:
+/// a surrounding deletion followed by a `Commit`, or by `Text` + `Commit`. Unlike the batch-local
+/// state in `keys::canvas_events`, this survives frames, because an interrupt reaches the
+/// platform later than the press that discarded the composition (#6916).
+#[derive(Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum DismissedReplacement {
+    #[default]
+    None,
+    Awaiting,
+    TextDropped,
 }
 
 pub struct CanvasState {
@@ -227,9 +254,14 @@ pub struct CanvasState {
     /// The chars of `ime_preedit` the input method marks as its cursor or selection, as it reports
     /// them (unchecked).
     pub(crate) ime_preedit_range: Option<std::ops::Range<usize>>,
+    /// The composition laid out into a document copy, so the text on its right reflows right.
+    pub(crate) ime_preview: Option<ImePreview>,
     /// Document faces added to the interface fonts so the input method's composition (#565) and a
     /// file name in the window caption can be drawn.
     pub(crate) ime_faces: Vec<std::sync::Arc<wordcraft_fonts::FontFace>>,
+    /// The document face this window's composition is drawn in, as the fonts were last installed
+    /// (its [`crate::theme::composition_family`]).
+    pub(crate) ime_face: Option<wordcraft_fonts::FaceRef>,
     pub want_focus: bool,
     pub context_issue: Option<serde_json::Value>,
     pub context_synonyms: Option<serde_json::Value>,
@@ -295,6 +327,18 @@ pub struct CanvasState {
     pub(crate) v_pressed: bool,
     /// The modifiers last held with Mod, for a Mod+V whose Mod is released before V.
     pub(crate) paste_mods: Option<egui::Modifiers>,
+    /// The modifiers a paste event is read with: those of Mod+V's press or a Mod change, until an
+    /// unrelated key, a pointer press or a focus change. (`paste_mods` also serves the release path.)
+    pub(crate) paste_event_mods: Option<egui::Modifiers>,
+    /// On the web, Mod+Shift+V pasted formatting from its key press: the browser's paste event
+    /// that follows is the same keystroke and pastes nothing (#5616). Any other key press clears it.
+    pub(crate) ignore_next_paste: bool,
+    /// When `ignore_next_paste` was set (input time, seconds): the browser's paired paste comes
+    /// with the key, so the wait ends after `PASTE_WAIT` and a later paste isn't dropped.
+    pub(crate) paste_wait_since: Option<f64>,
+    /// The platform sends a paste event after Mod+Shift+V's key (a browser does; a desktop shell
+    /// doesn't). Only then does the key leave a paste event to ignore or to let paste text.
+    pub(crate) paste_event_follows_chord: bool,
     /// Draw Table or Eraser is on (`table_pen`): presses draw instead of moving the caret.
     pub table_tool: Option<crate::table_pen::TableTool>,
     /// The Draw Table stroke (or eraser press) in progress.
@@ -318,6 +362,14 @@ pub struct CanvasState {
     /// A nonempty preedit lost its body/equation target. The next canvas event batch must
     /// reject that old composition's queued replacement before dispatching any mutation.
     pub(crate) ime_interrupted_preedit: bool,
+    /// The pre-edit text a pointer press discarded. The interrupt reaches the platform a frame
+    /// or two later, and until then it can keep reporting the old composition. Painting that
+    /// text again would put it under the pointer, because the press also moved the caret; a
+    /// different pre-edit starts a new composition, an empty one ends the old one.
+    pub(crate) ime_dismissed_preedit: Option<String>,
+    /// A surrounding deletion (and its paired replacement) still queued for that discarded
+    /// composition. It must not erase text at the caret the press moved to.
+    pub(crate) ime_dismissed_replacement: DismissedReplacement,
     /// The last bounded surrounding window and the `(revision, cursor, anchor)` it was built
     /// from. An idle pass reuses it instead of walking a long paragraph again.
     pub(crate) ime_window_cache: Option<(u64, wordcraft_doc::Pos, wordcraft_doc::Pos, Option<wordcraft_doc::ime_text::ImeWindow>)>,
@@ -468,7 +520,9 @@ impl Default for CanvasState {
             render_ms: 0.0,
             ime_preedit: String::new(),
             ime_preedit_range: None,
+            ime_preview: None,
             ime_faces: Vec::new(),
+            ime_face: None,
             want_focus: true,
             context_issue: None,
             context_synonyms: None,
@@ -487,11 +541,17 @@ impl Default for CanvasState {
             pasted: false,
             v_pressed: false,
             paste_mods: None,
+            paste_event_mods: None,
+            ignore_next_paste: false,
+            paste_wait_since: None,
+            paste_event_follows_chord: cfg!(target_arch = "wasm32"),
             swallow_text: false,
             ime_join_text: None,
             ime_reset: false,
             ime_interrupt_now: false,
             ime_interrupted_preedit: false,
+            ime_dismissed_preedit: None,
+            ime_dismissed_replacement: DismissedReplacement::None,
             ime_window_cache: None,
             ime_tracker: egui::ImeContextTracker::new(),
             ime_viewport: None,
@@ -674,7 +734,7 @@ fn prepare_view(app: &mut WordApp, ui: &Ui, full: Rect, layout: &DocLayout) -> C
             app.canvas.scroll_to_caret = true;
         }
     }
-    let caret = layout.caret_on(&preview_sel(app).unwrap_or(app.session.sel_ends()).focus, app.session.page_hint);
+    let caret = layout.caret_on(&shown_sel(app).unwrap_or(app.session.sel_ends()).focus, app.session.page_hint);
     let dim_body = dims_body(app, layout);
     let grid_story = text_box_host(app, layout).unwrap_or(app.session.sel.focus.story);
     let grid_story = matches!(part_kind(app, grid_story), Some(PartKind::Header | PartKind::Footer)).then_some(grid_story);
@@ -729,11 +789,12 @@ struct ScrollMotion {
     middle: egui::Vec2,
 }
 
+/// Computes this frame's scroll motion from mouse wheel/touchpad input, edge autoscroll, and middle-drag.
 fn scroll_motion(app: &mut WordApp, ui: &Ui, full: Rect, view: &CanvasView) -> ScrollMotion {
     // Read Mode's centred columns leave margins at the sides; the wheel turns pages over them too.
     let wheel_area = if app.session.view.read_mode { full } else { view.area };
     let hovered = wheel_hovered(ui.rect_contains_pointer(wheel_area), ui.ctx().dragged_id().is_some(), app.canvas.drag_selecting());
-    let notch = crate::scroll::notch_px(app.canvas.scale / PX_PER_PT);
+    let notch = crate::scroll::notch_px(app.canvas.scale / PX_PER_PT) * app.ui.scroll_speed.wheel_factor();
     let wheel_delta = if app.session.view.read_mode {
         let turns = ui.input(|i| read_wheel_turns(&i.events, hovered, &mut app.canvas.read_wheel_accum));
         for _ in 0..turns.unsigned_abs() {
@@ -839,9 +900,45 @@ fn configure_scroll_area(app: &mut WordApp, ui: &Ui, view: &CanvasView, motion: 
     (scroll_area, before.y + from_partner)
 }
 
+/// Discard a live composition after a pointer press, without putting its text into the body.
+///
+/// Everything that paints or consumes the pre-edit goes away together. In particular the cached
+/// preview copy must be dropped: `shown_doc` returns it, so leaving it in place keeps drawing the
+/// discarded text from the raster. A late `Commit` for that composition is quarantined too — on
+/// Windows an interrupt cancels, but `WM_IME_ENDCOMPOSITION` can still carry a result string.
+fn dismiss_ime_composition(app: &mut WordApp) {
+    if app.canvas.ime_preedit.is_empty() && app.canvas.ime_preview.is_none() {
+        return;
+    }
+    app.canvas.ime_dismissed_preedit = Some(std::mem::take(&mut app.canvas.ime_preedit));
+    app.canvas.ime_dismissed_replacement = DismissedReplacement::None;
+    app.canvas.ime_preedit_range = None;
+    app.canvas.ime_preview = None;
+    app.canvas.ime_interrupted_preedit = true;
+}
+
+/// A primary press on the page moves the caret later in this same frame (`handle_primary_press`).
+/// End the composition before the pages are laid out: rebuilt afterwards, the preview copy would
+/// insert the pre-edit at the pointer and the discarded text would appear to follow the mouse
+/// (#6916). The pre-edit is interface state, not document text, so nothing is committed.
+fn dismiss_ime_on_pointer_press(app: &mut WordApp, ui: &Ui, full: Rect) {
+    let press = ui.input(|i| {
+        i.events.iter().any(|e| {
+            matches!(e, egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: true, .. } if full.contains(*pos))
+        })
+    });
+    if press {
+        dismiss_ime_composition(app);
+    }
+}
+
 fn prepare_layout(app: &mut WordApp, ui: &Ui, full: Rect) -> std::sync::Arc<DocLayout> {
     let now = ui.input(|i| i.time);
     let reflow_anchor = update_viewport(app, ui, full, now);
+    // End the composition before this frame's events are dispatched. A `Commit` queued in the
+    // same batch as the press belongs to the composition being discarded, not to fresh input;
+    // `stale_composition` needs the dismissal flags in place to drop it (#6916).
+    dismiss_ime_on_pointer_press(app, ui, full);
     // While a modal dialog ("Save changes?" too) is up, keys answer it rather than edit the
     // document behind it, also in the frame it opens, before the canvas has given up focus.
     if app.canvas.focused && !app.modal_open() {
@@ -1017,9 +1114,20 @@ fn update_canvas_focus(app: &mut WordApp, ui: &mut Ui, resp: &egui::Response, im
     // while the canvas does not, and does not interrupt an editor that already has it.
     let keyboard_click = ui.memory(|m| m.has_focus(resp.id)) && ui.input(|i| i.key_pressed(egui::Key::Space) || i.key_pressed(egui::Key::Enter));
     let pointer_click = resp.clicked_by(egui::PointerButton::Primary);
+    let secondary_click = resp.clicked_by(egui::PointerButton::Secondary);
     let accesskit_click = resp.clicked() && !pointer_click && !keyboard_click;
     let focus_click = pointer_click || accesskit_click || resp.drag_started();
+    // Both buttons end a live composition: the interrupt closes the platform's candidate window.
+    // A left-click also moves the caret below. `prepare_layout` already discarded the pre-edit on
+    // the press, before the caret moved; this covers clicks without a press (accessibility) and
+    // drags. Interrupting an IME cancels its composition, so the text is dropped rather than
+    // committed, and a late platform Commit is quarantined. A right-click leaves the caret alone
+    // this frame (see `handle_secondary_selection`) and opens its menu at the pointer, so it keeps
+    // its composition until the platform answers the interrupt.
     if focus_click {
+        dismiss_ime_composition(app);
+    }
+    if focus_click || secondary_click {
         ui.memory_mut(|memory| memory.interrupt_ime());
     }
     // Not while a modal dialog is open: it has the keyboard, and the page takes it when it closes.
@@ -1211,7 +1319,7 @@ fn paint_pages(pass: PagePaint<'_>) -> PagePaintOutput {
                 opts.hinting &= hinted;
                 // Only on the page it is on: the `Pos` can't match an object of another page.
                 opts.display.hide_object = hidden.as_ref().filter(|(page, _)| *page == i).map(|(_, p)| p.clone());
-                wordcraft_render::render_page(page_doc(app), page, scale_px, &opts)
+                wordcraft_render::render_page(shown_doc(app), page, scale_px, &opts)
             };
             let ci = page_image(&img);
             match app.canvas.textures.get_mut(&i) {
@@ -1275,7 +1383,7 @@ fn paint_pages(pass: PagePaint<'_>) -> PagePaintOutput {
                     // The tiny subtraction avoids a 1px overshoot from round-tripping f32
                     // pixels through page points and render_area's ceil() conversion.
                     let img = wordcraft_render::render_area(
-                        page_doc(app),
+                        shown_doc(app),
                         page,
                         wordcraft_geom::Rect::new(0.0, start_px as f32 / scale_px, page.w, (height_px as f32 - 0.01).max(0.01) / scale_px),
                         scale_px,
@@ -1329,14 +1437,12 @@ fn paint_pages(pass: PagePaint<'_>) -> PagePaintOutput {
         }
         draw_page_gridlines(app, &painter, t, page, visual_sr, page_scale);
         // The current header/footer's cells have editing guides; explicit View Gridlines
-        // still outlines every table. Neither kind of guide is part of the document.
+        // still outlines every table. Both are drawn only where no border is (#5967), and
+        // neither kind of guide is part of the document.
         if app.session.view.table_gridlines || grid_story.is_some() {
-            for rect in gridline_cells(page, app.session.view.table_gridlines, grid_story) {
-                let r = Rect::from_min_size(
-                    pos2(visual_sr.min.x + rect.x * page_scale, visual_sr.min.y + rect.y * page_scale),
-                    vec2(rect.w * page_scale, rect.h * page_scale),
-                );
-                painter.rect_stroke(r, 0.0, Stroke::new(0.5, t.blue.linear_multiply(0.6)), egui::StrokeKind::Middle);
+            let at = |p: wordcraft_geom::Point| pos2(visual_sr.min.x + p.x * page_scale, visual_sr.min.y + p.y * page_scale);
+            for (a, b) in gridline_segments(page, app.session.view.table_gridlines, grid_story) {
+                painter.line_segment([at(a), at(b)], Stroke::new(0.5, t.blue.linear_multiply(0.6)));
             }
         }
     }
@@ -1441,7 +1547,10 @@ fn handle_secondary_selection(app: &mut WordApp, resp: &egui::Response, rects: &
         let at = wordcraft_geom::Point::new(x, y);
         let on_cells =
             wordcraft_engine::cmd::table_mouse::cell_rects(layout, &app.session.doc, range).iter().any(|(pi, r)| *pi == page && r.contains(at));
-        if !on_cells && let Some(pos) = layout.hit(page, x, y, app.session.sel.focus.story) {
+        // A live composition can have no preview copy (a range of cells refuses one). Keep the
+        // selected cells in that case too: a late IME result must not land in the cell the
+        // pointer clicked (#6916).
+        if !on_cells && app.canvas.ime_preedit.is_empty() && let Some(pos) = layout.hit(page, x, y, app.session.sel.focus.story) {
             app.session.sel = wordcraft_engine::Selection::caret(pos);
         }
     }
@@ -1468,17 +1577,36 @@ fn handle_secondary_selection(app: &mut WordApp, resp: &egui::Response, rects: &
         && let Some(p) = resp.interact_pointer_pos()
         && let Some((page, x, y)) = page_at(rects, layout, geo.scale, p)
     {
+        // A right-click interrupts a live composition (update_canvas_focus). Keep the caret where
+        // it is this frame: moving it would rebuild any preview under the mouse and drag the
+        // pre-edit there, and a late platform result would land at the pointer instead of the
+        // composition. On Windows an interrupt normally cancels rather than commits that text.
+        // Read the live pre-edit, not the preview: an equation or a non-collapsed selection has
+        // no preview layout but still owns an active composition. The context menu still opens
+        // at the pointer (#6916).
+        let composing = !app.canvas.ime_preedit.is_empty();
         if crate::objects::select_at(app, layout, rects, geo.scale, p) {
             app.canvas.context_issue = None;
             app.canvas.context_synonyms = None;
         } else if let Some(pos) = layout.hit(page, x, y, app.session.sel.focus.story) {
-            let (a, b) = app.session.sel.ordered();
-            if !(a <= pos && pos <= b) || app.session.sel.is_collapsed() {
-                app.session.sel = wordcraft_engine::Selection::caret(pos);
+            if !composing {
+                let (a, b) = app.session.sel.ordered();
+                if !(a <= pos && pos <= b) || app.session.sel.is_collapsed() {
+                    app.session.sel = wordcraft_engine::Selection::caret(pos);
+                }
             }
             context_suggestions(app);
         }
     }
+}
+
+/// The layout for anything that maps a screen point to a document position — pointer hit-testing
+/// and the accessibility tree. During a composition the shown layout is a copy holding uncommitted
+/// pre-edit text with copy-relative offsets; a hit in it must not be written back to the real
+/// document's selection, so these paths use the real document's layout instead. Only the page
+/// pixels and the caret drawn on them use the shown one (#6916).
+fn document_layout(app: &mut WordApp, shown: &std::sync::Arc<DocLayout>) -> std::sync::Arc<DocLayout> {
+    if app.canvas.ime_preview.is_some() { app.session.layout() } else { shown.clone() }
 }
 
 /// Finish the canvas frame: update scroll state, handle focus, input, accessibility, and context menus.
@@ -1501,14 +1629,19 @@ fn finish_canvas_frame(finish: CanvasFinish<'_>, out: egui::scroll_area::ScrollA
     } = finish;
     update_canvas_scroll_state(app, ui, layout, geo, caret, &out, ScrollSync { base: scroll_base, rescaled, style: scroll_style });
     let (resp, rects) = out.inner;
+    // Capture the layout matching the real document *before* focus handling: an accessibility
+    // focus click dismisses the composition and clears `ime_preview`, which is what
+    // `document_layout` keys off. The layout this frame was drawn from does not change.
+    let doc_layout = document_layout(app, layout);
     // A click on the page leaves the selected comment balloon.
     dismiss_balloon_on_canvas_click(app, ui, &resp);
     update_canvas_focus(app, ui, &resp, ime_geometry, ime_interrupt);
-    // Screen readers: the document under the canvas, with the caret (#488).
-    crate::a11y::expose(app, ui.ctx(), resp.id, layout, &rects, area);
+    // Screen readers and clicks describe the document, not an uncommitted composition: read and
+    // hit-test the real layout so positions never carry the pre-edit's offset (#6916).
+    crate::a11y::expose(app, ui.ctx(), resp.id, &doc_layout, &rects, area);
     // The buttons that start or stop middle-click scrolling don't also click the page.
     let middle_gesture = app.canvas.auto_scroll.blocks_input();
-    handle_primary_pointer(app, ui, &resp, &rects, layout, geo, middle_gesture);
+    handle_primary_pointer(app, ui, &resp, &rects, &doc_layout, geo, middle_gesture);
     // A click on a check box ticks it; on a list's button opens the list.
     if !middle_gesture {
         crate::content_controls::clicks(app, &resp);
@@ -1518,7 +1651,7 @@ fn finish_canvas_frame(finish: CanvasFinish<'_>, out: egui::scroll_area::ScrollA
     // the blank placeholder document's selection or look up suggestions for it. The menu still
     // opens at the pointer below.
     if app.session.pdf_view().is_none() {
-        handle_secondary_selection(app, &resp, &rects, layout, geo, secondary_clicked);
+        handle_secondary_selection(app, &resp, &rects, &doc_layout, geo, secondary_clicked);
     }
     // Shift+F10 opens the same menu below the caret, for the selection or the word there (#821).
     let from_keys = std::mem::take(&mut app.canvas.context_menu_from_keys);
@@ -1840,9 +1973,15 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         } else {
             balloons(app, ui, &painter, &rects, &layout, geo.scale, view_rect);
         }
-        // Find › Reading Highlight. Its places are the document's, not the preview's.
-        let marks: Vec<(Pos, Pos)> =
-            if preview_sel(app).is_some() { Vec::new() } else { app.session.find_highlights().iter().take(5000).cloned().collect() };
+        // Find › Reading Highlight. Its places are the document's, not a preview's. A table preview
+        // shows a copy, and an IME composition shows a copy with the pre-edit inserted; in both the
+        // document's real offsets would highlight the wrong glyphs on the page, so hold them back
+        // until the preview ends (#6916).
+        let marks: Vec<(Pos, Pos)> = if preview_sel(app).is_some() || app.canvas.ime_preview.is_some() {
+            Vec::new()
+        } else {
+            app.session.find_highlights().iter().take(5000).cloned().collect()
+        };
         for (a, b) in &marks {
             for (pi, r) in layout.selection_rects(&app.session.doc, a, b, app.session.page_hint) {
                 if let Some(pr) = rects.get(pi) {
@@ -1978,7 +2117,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             }
         }
         if !math_caret
-            && let Some(c) = layout.caret_on(&preview_sel(app).unwrap_or(&app.session.sel).focus, app.session.page_hint)
+            && let Some(c) = layout.caret_on(&shown_sel(app).unwrap_or(&app.session.sel).focus, app.session.page_hint)
             && let Some(pr) = rects.get(c.page)
         {
             let scale = layout.pages.get(c.page).map_or(geo.scale, |page| page_screen_scale(*pr, page, geo.scale));
@@ -1991,11 +2130,12 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
             // worked out only when something is drawn in it.
             let caret_color =
                 |app: &mut WordApp| caret_color_at(app, &layout, c.page, c.x + c.width / 2.0, c.top + c.height / 2.0, page_view, dim_body);
-            // An input method's composition is drawn from the caret, and the caret and the candidate
-            // window move to the input method's cursor inside it.
+            // An input method's composition is drawn either into the page raster (the body: the
+            // pre-edit is laid out at the caret so the text on its right reflows right) or, when
+            // no such layout was possible, as the overlay below. Never paint both.
             let mut preedit_color = None;
             let mut ime_dx = 0.0;
-            if focused && !app.canvas.ime_preedit.is_empty() {
+            if focused && app.canvas.ime_dismissed_preedit.is_none() && !app.canvas.ime_preedit.is_empty() && app.canvas.ime_preview.is_none() {
                 // The composition is interface text, but it may be in a script the interface fonts lack
                 // (Bangla, Thai ...): borrow the document fonts' fallback faces, or it draws as boxes (#565).
                 let new = crate::theme::faces_for_preedit(
@@ -2017,12 +2157,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                     ui.ctx().request_repaint();
                 }
                 let color = caret_color(app);
-                let g = painter.layout_no_wrap(app.canvas.ime_preedit.clone(), regular(c.height * scale * 0.8), Color32::PLACEHOLDER);
-                let at = preedit_cursor_chars(&app.canvas.ime_preedit, app.canvas.ime_preedit_range.as_ref());
-                ime_dx = g.pos_from_cursor(egui::text::CCursor::new(at)).min.x;
-                let r = Rect::from_min_size(pos2(x, y1 - g.size().y), g.size());
-                painter.galley(r.min, g, color);
-                painter.line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0, color));
+                let at = CompositionAt { pr: *pr, scale, x, y1, height: c.height, turned: c.width > 0.0, color, max_tex, ppp };
+                ime_dx = paint_composition(app, ui.ctx(), &painter, &layout, &at);
                 preedit_color = Some(color);
             }
             let x = x + ime_dx;
@@ -2033,7 +2169,7 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
                 [pos2(x.round() + 0.5, y0), pos2(x.round() + 0.5, y1)]
             };
             // The caret glides and fades like Word's (`caret_glide`).
-            let shown = preview_sel(app).unwrap_or(&app.session.sel).is_collapsed() && focused;
+            let shown = shown_sel(app).unwrap_or(&app.session.sel).is_collapsed() && focused;
             let look = crate::caret_glide::look(
                 app,
                 ui,
@@ -2080,6 +2216,78 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         },
         out,
     );
+}
+
+/// Where [`paint_composition`] draws an input method's composition: from the caret at `x` on the
+/// page drawn at `pr` (`scale` screen points to the point), whose bottom is at `y1` and whose
+/// height is `height` points, across the page in turned text. `max_tex` and `ppp` are the
+/// texture side and pixels per point the composition's glyphs must fit.
+struct CompositionAt {
+    pr: Rect,
+    scale: f32,
+    x: f32,
+    y1: f32,
+    height: f32,
+    turned: bool,
+    color: Color32,
+    max_tex: f32,
+    ppp: f32,
+}
+
+/// Draw the input method's composition and return how far into it the input method's cursor
+/// lies, in screen points.
+fn paint_composition(app: &mut WordApp, ctx: &egui::Context, painter: &egui::Painter, layout: &DocLayout, at: &CompositionAt) -> f32 {
+    // The composition is interface text, but it may be in a script the interface fonts lack
+    // (Bangla, Thai ...): borrow the document fonts' fallback faces, or it draws as boxes (#565).
+    // CJK uses the CJK UI font, as the window caption does: the faces a document falls back
+    // to for it are mostly too large to borrow (Microsoft YaHei on Windows is 19 MB), and a
+    // build without craft-fonts has no CJK interface face of its own.
+    if !app.want_system_cjk && app.canvas.ime_preedit.chars().any(wordcraft_fonts::is_cjk) {
+        app.want_system_cjk = true;
+        ctx.request_repaint();
+    }
+    let new = crate::theme::faces_for_preedit(&app.canvas.ime_preedit, &app.canvas.ime_faces, crate::theme::caption_char_covered, |c| {
+        wordcraft_fonts::FontDb::global().fallback_for(c, u32::MAX)
+    });
+    // Word draws the composition in the font and size of the text it goes into: take the
+    // face, size and baseline the layout gives text typed here (not in turned text). The
+    // face is the one the run's font asks for, not a fallback face that drew the
+    // character before the caret (a Chinese character in a Latin font).
+    let typing = if at.turned { None } else { layout.typing_style(&app.session.sel.focus, app.session.page_hint) };
+    let face = typing.as_ref().map(|(run, _)| run.requested_face);
+    if !new.is_empty() || face != app.canvas.ime_face {
+        app.canvas.ime_faces.extend(new);
+        app.canvas.ime_face = face;
+        // With every other window's faces too: the fonts are the app's.
+        app.apply_ui_fonts(ctx);
+        ctx.request_repaint();
+    }
+    // New fonts apply from the next frame; until the window's composition family is bound (or
+    // without a style run) the composition is drawn as before, in the interface font.
+    let family = crate::theme::composition_family(app.windows.shown());
+    let bound = ctx.fonts(|f| f.definitions().families.contains_key(&family));
+    // egui draws each glyph into its font atlas and panics on one wider than the atlas
+    // (1,638-point text at 500% is about 11,000 points): keep the composition's glyphs
+    // within a quarter of the atlas side, and at most 1,024 pixels, as each glyph stays
+    // in the atlas. Larger text gets a smaller composition.
+    let most = (at.max_tex / 4.0).min(1024.0) / at.ppp;
+    let size = |s: f32| s.min(most).max(1.0);
+    let (font, base) = match &typing {
+        Some((run, base)) if bound && run.size.is_finite() && run.size > 0.0 => {
+            (egui::FontId::new(size(run.size * at.scale), family), Some(at.pr.min.y + base * at.scale))
+        }
+        _ => (regular(size(at.height * at.scale * 0.8)), None),
+    };
+    let g = painter.layout_no_wrap(app.canvas.ime_preedit.clone(), font, Color32::PLACEHOLDER);
+    let cursor = preedit_cursor_chars(&app.canvas.ime_preedit, app.canvas.ime_preedit_range.as_ref());
+    let dx = g.pos_from_cursor(egui::text::CCursor::new(cursor)).min.x;
+    // The galley's first baseline sits on the line's baseline, as typed text would.
+    let baseline = g.rows.first().and_then(|r| r.glyphs.first().map(|gl| r.pos.y + gl.pos.y)).unwrap_or(g.size().y);
+    let top = base.map_or(at.y1 - g.size().y, |b| b - baseline);
+    let r = Rect::from_min_size(pos2(at.x, top), g.size());
+    painter.galley(r.min, g, at.color);
+    painter.line_segment([pos2(r.min.x, r.max.y), pos2(r.max.x, r.max.y)], Stroke::new(1.0, at.color));
+    dx
 }
 
 #[cfg(test)]
