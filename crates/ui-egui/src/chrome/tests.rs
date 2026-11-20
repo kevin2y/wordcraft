@@ -881,6 +881,26 @@ fn start_screen_has_no_placeholder_document_tab() {
     assert!(labels.iter().any(|(l, ..)| l.contains("Document1")), "a real new document gets a tab: {labels:?}");
 }
 
+/// Short document tabs hug their titles: spare title-bar width is a drag band before the caption
+/// buttons, not padding stretched between the tabs.
+#[test]
+fn document_tabs_hug_their_titles_in_a_wide_window() {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+    a.run("file.rename", json!({"name": "One"})).unwrap();
+    a.run("file.new", json!({})).unwrap();
+    a.run("file.rename", json!({"name": "Two"})).unwrap();
+    assert_eq!(a.tab_count(), 2);
+    let nodes = labelled_scaled(&mut a, 1440.0, 1.0, title_bar);
+    let mut tabs: Vec<_> = nodes.iter().filter(|(l, ..)| l.contains("One") || l.contains("Two")).cloned().collect();
+    tabs.sort_by_key(|(_, left, _)| *left as i64);
+    assert_eq!(tabs.len(), 2, "both document tabs are drawn: {nodes:?}");
+    let between = tabs[1].1 - tabs[0].2;
+    assert!((0.0..=8.0).contains(&between), "short tabs stay close: {between} pt between {tabs:?}");
+    let plus = nodes.iter().find(|(l, ..)| l == "New Document").expect("the + button");
+    let after = plus.1 - tabs[1].2;
+    assert!((0.0..=8.0).contains(&after), "the + stays beside the last tab: {after} pt after {tabs:?}");
+}
+
 /// Without the OS title bar the tab strip draws its own caption buttons; macOS keeps its lights.
 #[test]
 fn caption_buttons_are_drawn_only_on_a_borderless_window() {

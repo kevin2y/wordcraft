@@ -393,6 +393,11 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
     // Without the OS title bar the window needs its own caption buttons.
     let button_w = 38.0;
     let buttons_w = if mac { 0.0 } else { button_w * 3.0 };
+    // Tabs hug their titles: only a small fixed gap separates them. Any spare width stays as a
+    // drag band before the caption buttons instead of stretching the space between tabs.
+    let tab_gap = 4.0;
+    let tab_pad = 32.0;
+    let tab_max = 240.0;
     egui::Panel::top("title_bar")
         .exact_size(if mac { bar.height } else { 38.0 })
         .frame(egui::Frame::NONE.fill(t.title_bar).inner_margin(egui::Margin { left, right: 10, top: 0, bottom: 0 }))
@@ -440,24 +445,23 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                     if home_resp.on_hover_text(tl!("File")).clicked() {
                         let _ = app.run("ui.backstage", json!({"value": true}));
                     }
-                    ui.add_space(6.0);
+                    ui.add_space(tab_gap);
 
                     // The tabs belong to this window; the session supplies their names and state.
                     let all = app.session.documents();
                     let infos: Vec<_> = app.tab_docs().into_iter().filter_map(|id| all.iter().find(|d| d.id == id).cloned()).collect();
-                    let gap = 6.0;
                     let avail = ui.available_width();
+                    // The slot is only a maximum tab width, used to shorten long titles. Short
+                    // titles keep their natural width; the rest of the band remains draggable.
                     let slot = if infos.is_empty() {
                         0.0
                     } else {
-                        // Leave room for `+`, the caption buttons and the gaps, then share what is
-                        // left evenly. Tabs wider than 260 pt leave the rest as drag space.
-                        ((avail - 24.0 - buttons_w - 8.0 - gap * (infos.len() as f32 + 1.0)) / infos.len() as f32).clamp(0.0, 260.0)
+                        ((avail - 24.0 - buttons_w - 8.0 - tab_gap * (infos.len() as f32 + 1.0)) / infos.len() as f32).clamp(0.0, tab_max)
                     };
                     for info in &infos {
                         let title = document_tab_title(app, info);
                         let mut shown: String = title.chars().take(240).collect();
-                        let text_room = (slot - 40.0).max(0.0);
+                        let text_room = (slot - tab_pad).max(0.0);
                         if text_width(ui.painter(), &shown, &font, track, t.text) > text_room {
                             while !shown.is_empty() && text_width(ui.painter(), &format!("{shown}…"), &font, track, t.text) > text_room {
                                 shown.pop();
@@ -465,7 +469,7 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                             shown.push('…');
                         }
                         let w = text_width(ui.painter(), &shown, &font, track, t.text).min(text_room);
-                        let tab_w = w + 40.0;
+                        let tab_w = w + tab_pad;
                         let (r, _) = ui.allocate_exact_size(vec2(tab_w, control_h + 6.0), Sense::hover());
                         let resp = ui.interact(r, tab_id(ui, info.id), Sense::click());
                         let active = info.active && !app.ui.backstage;
@@ -489,7 +493,7 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                                 let _ = app.show_document(info.id);
                             }
                         }
-                        let close = Rect::from_center_size(pos2(r.max.x - 12.0, r.center().y), vec2(18.0, 18.0));
+                        let close = Rect::from_center_size(pos2(r.max.x - 10.0, r.center().y), vec2(16.0, 16.0));
                         let close_resp = ui.interact(close, close_tab_id(ui, info.id), Sense::click());
                         // A distinct name keeps the tab control out of dialog "Close" lookups.
                         close_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Close Document")));
@@ -497,13 +501,13 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                             close.center(),
                             Align2::CENTER_CENTER,
                             "×",
-                            regular(15.0),
+                            regular(14.0),
                             if close_resp.hovered() { t.text } else { t.text_dim },
                         );
                         if close_resp.on_hover_text(tl!("Close Document")).clicked() {
                             let _ = app.close_tab(info.id);
                         }
-                        ui.add_space(gap + (slot - tab_w).max(0.0));
+                        ui.add_space(tab_gap);
                     }
 
                     // A `+` opens a new document in this window, as another tab.
