@@ -276,6 +276,9 @@ pub struct Tokens {
     pub title_bar: Color32,
     pub ribbon: Color32,
     pub tab_strip: Color32,
+    /// An unselected document tab: one step darker than the title bar, so the tab reads as a
+    /// separate surface without competing with the selected tab.
+    pub tab_inactive: Color32,
     pub canvas: Color32,
     pub panel: Color32,
     pub border: Color32,
@@ -347,6 +350,7 @@ impl Tokens {
             title_bar: Color32::from_rgb(0xF0, 0xF0, 0xF0),
             ribbon: Color32::from_rgb(0xF9, 0xF9, 0xF9),
             tab_strip: Color32::from_rgb(0xF0, 0xF0, 0xF0),
+            tab_inactive: Color32::from_rgb(0xE8, 0xE8, 0xE8),
             canvas: Color32::from_rgb(0xE6, 0xE6, 0xE6),
             panel: Color32::from_rgb(0xFA, 0xFA, 0xFA),
             border: Color32::from_rgb(0xE1, 0xE1, 0xE1),
@@ -412,6 +416,7 @@ impl Tokens {
             title_bar: Color32::from_rgb(0x1F, 0x1F, 0x1F),
             ribbon: Color32::from_rgb(0x29, 0x29, 0x29),
             tab_strip: Color32::from_rgb(0x1F, 0x1F, 0x1F),
+            tab_inactive: Color32::from_rgb(0x19, 0x19, 0x19),
             canvas: Color32::from_rgb(0x14, 0x14, 0x14),
             panel: Color32::from_rgb(0x26, 0x26, 0x26),
             border: Color32::from_rgb(0x3A, 0x3A, 0x3A),
@@ -1047,6 +1052,20 @@ mod tests {
         };
         let (x, y) = (lum(a), lum(b));
         (x.max(y) + 0.05) / (x.min(y) + 0.05)
+    }
+
+    /// An unselected tab is a touch darker than the title bar, so it reads as its own surface
+    /// without turning into a different panel; its label still reaches 4.5:1.
+    #[test]
+    fn inactive_tab_is_a_touch_darker_than_the_title_bar() {
+        for t in [super::Tokens::light(), super::Tokens::dark()] {
+            let delta = i32::from(t.title_bar.r()) - i32::from(t.tab_inactive.r());
+            assert!((4..=12).contains(&delta), "dark={}: inactive tab is {delta} shades off the title bar", t.dark);
+            assert_eq!(t.tab_inactive.g(), t.tab_inactive.r(), "dark={}: inactive tab stays neutral", t.dark);
+            assert_eq!(t.tab_inactive.b(), t.tab_inactive.r(), "dark={}: inactive tab stays neutral", t.dark);
+            let r = contrast(t.text_dim, t.tab_inactive);
+            assert!(r >= 4.5, "dark={}: dim tab text is {r:.2}:1 on the inactive tab", t.dark);
+        }
     }
 
     /// #1885: the ✕ on a window's close box reads on its hover and pressed reds in both themes.

@@ -431,7 +431,7 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                     let (home_r, _) = ui.allocate_exact_size(vec2(home_w, control_h + 6.0), Sense::hover());
                     let home_resp = ui.interact(home_r, home_tab_id(ui), Sense::click());
                     let home_active = app.ui.backstage;
-                    ui.painter().rect_filled(home_r, 5.0, if home_active { t.ribbon } else { t.title_bar });
+                    ui.painter().rect_filled(home_r, 5.0, if home_active { t.ribbon } else { t.tab_inactive });
                     paint_text(
                         ui.painter(),
                         pos2(home_r.min.x + 8.0, home_r.center().y - TypeRung::Chrome.line_height() / 2.0),
@@ -473,7 +473,7 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                         let (r, _) = ui.allocate_exact_size(vec2(tab_w, control_h + 6.0), Sense::hover());
                         let resp = ui.interact(r, tab_id(ui, info.id), Sense::click());
                         let active = info.active && !app.ui.backstage;
-                        ui.painter().rect_filled(r, 5.0, if active { t.ribbon } else { t.title_bar });
+                        ui.painter().rect_filled(r, 5.0, if active { t.ribbon } else { t.tab_inactive });
                         paint_text(
                             ui.painter(),
                             pos2(r.min.x + 8.0, r.center().y - TypeRung::Chrome.line_height() / 2.0),
