@@ -14,6 +14,7 @@ pub mod comments;
 pub mod html;
 pub mod latex;
 pub mod markdown;
+mod markdown_images;
 pub mod mathml;
 pub mod mht;
 pub mod model;

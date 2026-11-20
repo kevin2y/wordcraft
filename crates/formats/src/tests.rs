@@ -702,6 +702,54 @@ fn html_img_sources_go_through_the_loader() {
 }
 
 #[test]
+fn markdown_local_image_paths_go_through_the_loader() {
+    // A local image path in Markdown is rewritten to a data URI and becomes a picture.
+    let md = "![图片1](image1.png)\n\n![gone](missing.png)\n";
+    let pic = png();
+    let seen = std::cell::RefCell::new(Vec::new());
+    let d = crate::markdown::import_with(md, &|src| {
+        seen.borrow_mut().push(src.to_string());
+        (src == "image1.png").then(|| Arc::new(pic.clone()))
+    });
+    assert_eq!(*seen.borrow(), ["image1.png", "missing.png"]);
+    assert_eq!(d.media.len(), 1, "one picture survives");
+    let text = d.plain_text(wordcraft_doc::StoryRef::Body);
+    assert!(!text.contains("图片1"), "the loaded image's alt is not body text");
+    assert!(text.contains("gone"), "an unresolved image keeps its alt text");
+
+    // Without a loader, only data: URIs load (the earlier behaviour).
+    assert!(crate::markdown::import(md).media.is_empty());
+}
+
+#[test]
+fn markdown_export_names_a_picture_file_the_reader_can_find() {
+    let d = sample();
+    let plan = crate::markdown::export_plan(&d);
+    assert!(plan.text.contains("![tiny](image.png)"), "{:?}", plan.text);
+    assert_eq!(plan.images.len(), 1);
+    assert_eq!(plan.images[0].0, "image.png");
+    assert_eq!(plan.images[0].1.as_slice(), png());
+
+    // The name in the text is the one the reader gets through the loader.
+    let back = crate::markdown::import_with(&plan.text, &|src| plan.images.iter().find(|(name, _)| name == src).map(|(_, bytes)| bytes.clone()));
+    assert_eq!(back.media.len(), 1, "the written Markdown shows the picture again");
+}
+
+#[test]
+fn markdown_export_can_name_a_picture_from_its_source_file() {
+    let d = sample();
+    let plan = crate::markdown::export_plan_named(&d, &|_, _| "Photo 1.png".to_string());
+    // The file on disk keeps its plain name; the Markdown destination percent-encodes it.
+    assert!(plan.text.contains("![tiny](Photo%201.png)"), "{:?}", plan.text);
+    assert_eq!(plan.images[0].0, "Photo 1.png");
+    let back = crate::markdown::import_with(&plan.text, &|src| {
+        let decoded = String::from_utf8(crate::model::percent_decode(src)).ok()?;
+        plan.images.iter().find(|(name, _)| *name == decoded).map(|(_, bytes)| bytes.clone())
+    });
+    assert_eq!(back.media.len(), 1, "the encoded destination still finds its picture");
+}
+
+#[test]
 fn chart_alt_text_is_an_image_alt_never_body_text() {
     let mut p = Paragraph::with_text("See below", CharProps::default());
     let chart = InlineObject::Graphic { w: 100.0, h: 50.0, alt: "Sales".into(), float: Default::default(), graphic: Arc::new(Default::default()) };

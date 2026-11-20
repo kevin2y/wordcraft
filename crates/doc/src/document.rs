@@ -78,6 +78,7 @@ impl Document {
             media_index: MediaIndex::default(),
             kept: Default::default(),
             missing_pictures: Default::default(),
+            image_sources: Default::default(),
             fit_state: None,
         }
     }
@@ -157,6 +158,7 @@ impl Document {
             media_index: _,
             kept: _,
             missing_pictures: _,
+            image_sources: _,
             fit_state: _,
         } = self;
         let Document {
@@ -179,6 +181,7 @@ impl Document {
             media_index: _,
             kept: _,
             missing_pictures: _,
+            image_sources: _,
             fit_state: _,
         } = other;
         same_blocks(body, other_body)

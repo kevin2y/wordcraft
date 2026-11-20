@@ -74,15 +74,22 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
 pub use craft_mime::transfer::base64 as base64_encode;
 
 pub(crate) fn picture(s: &mut Session, v: &Value) -> CmdResult {
+    let path = p::str(v, "path");
     let bytes = if let Some(d) = p::str(v, "data") {
         base64_decode(d).ok_or_else(|| CmdError::Params("bad base64 data".into()))?
-    } else if let Some(path) = p::str(v, "path") {
+    } else if let Some(path) = path {
         crate::io::read_file(path).map_err(CmdError::Failed)?
     } else {
         s.push_ui_request(json!({"open": "insertPicture"}));
         return sel_result(s);
     };
-    place_picture(s, bytes, p::f32(v, "width"), p::str(v, "alt").unwrap_or(""))
+    let result = place_picture(s, bytes, p::f32(v, "width"), p::str(v, "alt").unwrap_or(""))?;
+    // Remember where the picture came from so saving Markdown can name it after its file (and
+    // copy it beside the .md when it lives elsewhere). Inserting bytes has no such name.
+    if let (Some(path), Some(key)) = (path, result.get("media").and_then(|k| k.as_str())) {
+        s.doc.image_sources.insert(key.to_string(), std::path::PathBuf::from(path));
+    }
+    Ok(result)
 }
 
 /// The media extension of an encoded image by its magic bytes, as the picture probe accepted it

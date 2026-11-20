@@ -95,6 +95,21 @@ impl FileText {
     }
 }
 
+/// Loader for pictures named by relative paths in the Markdown source, from the folder of the
+/// file the session has open. Uses the same guarded local-file reader as HTML import. On the web
+/// there is no local file system, so nothing resolves.
+fn image_loader(s: &Session) -> impl Fn(&str) -> Option<Arc<Vec<u8>>> {
+    #[cfg(not(target_arch = "wasm32"))]
+    {
+        let images = s.path.as_ref().and_then(|p| p.parent()).map(crate::io::LocalImages::new);
+        move |src| images.as_ref().and_then(|im| im.load(src))
+    }
+    #[cfg(target_arch = "wasm32")]
+    {
+        move |_: &str| None
+    }
+}
+
 /// The kept text that stands for the document as it is, if one does: the latest first.
 fn exact_text(s: &Session) -> Option<String> {
     if let Some((cached_rev, ref res)) = *s.md_file.cached_exact.borrow()
@@ -103,7 +118,7 @@ fn exact_text(s: &Session) -> Option<String> {
         return res.clone();
     }
     let kept = [s.md_file.latest.as_deref(), s.md_file.saved.as_deref()];
-    let res = kept.into_iter().flatten().find(|text| parse(&s.doc, text).same_content(&s.doc)).map(str::to_string);
+    let res = kept.into_iter().flatten().find(|text| parse(s, text).same_content(&s.doc)).map(str::to_string);
     *s.md_file.cached_exact.borrow_mut() = Some((s.rev(), res.clone()));
     res
 }
@@ -216,7 +231,7 @@ fn enter(s: &mut Session) -> Result<(), CmdError> {
     // The file's own text when it still says what the document holds, so nothing is lost.
     let (text, loses_content, block_lines) = match exact_text(s) {
         Some(text) => {
-            let (_, lines) = parse_with_lines(&s.doc, &text);
+            let (_, lines) = parse_with_lines(s, &text);
             (text, false, lines)
         }
         None => {
@@ -224,7 +239,7 @@ fn enter(s: &mut Session) -> Result<(), CmdError> {
             if text.len() > MAX_SOURCE_BYTES {
                 return Err(CmdError::Failed(too_long()));
             }
-            let (doc, lines) = parse_with_lines(&s.doc, &text);
+            let (doc, lines) = parse_with_lines(s, &text);
             let loses_content = !doc.same_content(&s.doc);
             (text, loses_content, lines)
         }
@@ -289,7 +304,7 @@ pub fn apply(s: &mut Session) {
         }
         (src.text.clone(), src.entry_text.clone(), src.entry_doc.clone(), src.has_step, src.entry_lines.clone())
     };
-    let (doc, lines) = if text == *entry_text { ((*entry_doc).clone(), entry_lines) } else { parse_with_lines(&s.doc, &text) };
+    let (doc, lines) = if text == *entry_text { ((*entry_doc).clone(), entry_lines) } else { parse_with_lines(s, &text) };
     let step = if !has_step {
         s.checkpoint(LABEL);
         Some(s.undo_mark())
@@ -311,10 +326,12 @@ pub fn apply(s: &mut Session) {
     }
 }
 
-/// `text` as a document and block lines, with what isn't in Markdown from `current`: its page, settings,
-/// properties and language, as opening the file gave it.
-fn parse_with_lines(current: &Document, text: &str) -> (Document, Vec<usize>) {
-    let (mut doc, lines) = wordcraft_formats::markdown::import_on_with_lines(text, &current.last_section);
+/// `text` as a document and block lines, with what isn't in Markdown from the session's document:
+/// its page, settings, properties and language, as opening the file gave it. Local image paths
+/// resolve against the open file's folder.
+fn parse_with_lines(s: &Session, text: &str) -> (Document, Vec<usize>) {
+    let current = &s.doc;
+    let (mut doc, lines) = wordcraft_formats::markdown::import_on_with_lines_and_images(text, &image_loader(s), &current.last_section);
     doc.ensure_nonempty();
     doc.settings = current.settings.clone();
     doc.core = current.core.clone();
@@ -322,10 +339,10 @@ fn parse_with_lines(current: &Document, text: &str) -> (Document, Vec<usize>) {
     (doc, lines)
 }
 
-/// `text` as a document, with what isn't in Markdown from `current`: its page, settings,
-/// properties and language, as opening the file gave it.
-fn parse(current: &Document, text: &str) -> Document {
-    parse_with_lines(current, text).0
+/// `text` as a document, with what isn't in Markdown from the session's document: its page,
+/// settings, properties and language, as opening the file gave it.
+fn parse(s: &Session, text: &str) -> Document {
+    parse_with_lines(s, text).0
 }
 
 /// The byte offset where `line` starts, or the end of a text with fewer lines.

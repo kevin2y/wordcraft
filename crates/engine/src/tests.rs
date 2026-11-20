@@ -6222,6 +6222,126 @@ fn html_pictures_load_relative_to_the_file() {
     assert!(!text.contains("Logo") && text.contains('T') && text.contains("Web"), "{text:?}");
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn markdown_pictures_load_relative_to_the_file() {
+    // `![图片1](image1.png)` embeds the picture beside the .md file; a missing path keeps its alt.
+    let dir = scratch_dir("wordcraft-md-img");
+    std::fs::write(dir.join("image1.png"), tiny_png()).unwrap();
+    std::fs::write(dir.join("secret.txt"), b"not a picture").unwrap();
+    let md = "![图片1](image1.png)\n\n![missing](none.png)\n\n![web](https://example.com/x.png)\n";
+    std::fs::write(dir.join("page.md"), md).unwrap();
+    let doc = crate::io::open_path(&dir.join("page.md")).unwrap();
+    assert_eq!(doc.media.len(), 1, "only the local picture loads");
+    let text = doc.plain_text(StoryRef::Body);
+    assert!(!text.contains("图片1"), "the loaded picture's alt is not body text");
+    assert!(text.contains("missing") && text.contains("web"), "{text:?}");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn markdown_source_round_trip_keeps_the_original_image_path() {
+    // Opening a .md keeps its own text for Save; the embedded picture must not turn the saved
+    // source into a data URI, and Markdown Source view must show the path as written.
+    let dir = scratch_dir("wordcraft-md-img-roundtrip");
+    std::fs::write(dir.join("image1.png"), tiny_png()).unwrap();
+    let path = dir.join("page.md");
+    let md = "Title\n\n![图片1](image1.png)\n";
+    std::fs::write(&path, md).unwrap();
+
+    let mut session = s();
+    run(&mut session, "file.open", json!({"path": path.to_string_lossy()}));
+    // The document holds the picture.
+    assert_eq!(session.doc.media.len(), 1);
+    // Entering source view shows the original path, not a data URI.
+    run(&mut session, "view.markdownSource", json!({"value": true}));
+    let entered = run(&mut session, "view.markdownSourceText", json!({}));
+    let text = entered.get("text").and_then(|v| v.as_str()).unwrap_or("");
+    assert!(text.contains("![图片1](image1.png)"), "source keeps the path: {text:?}");
+    assert!(!text.contains("data:"), "no data URI is written into the source: {text:?}");
+    // Leaving and saving writes the path back unchanged.
+    run(&mut session, "view.markdownSource", json!({"value": false}));
+    run(&mut session, "file.save", json!({}));
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), md);
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn markdown_save_writes_the_picture_beside_the_file() {
+    let dir = scratch_dir("wordcraft-md-img-save");
+    let mut session = s();
+    let key = session.doc.add_media(tiny_png(), "png");
+    let image = wordcraft_doc::InlineObject::Image {
+        media: key,
+        w: 24.0,
+        h: 12.0,
+        alt: "tiny".into(),
+        float: Default::default(),
+        crop: [0.0; 4],
+        fx: Default::default(),
+        ole: None,
+    };
+    session.doc.para_mut(StoryRef::Body, &wordcraft_doc::Path::top(0)).unwrap().insert_object(0, image, &Default::default()).unwrap();
+    let path = dir.join("page.md");
+    run(&mut session, "file.saveAs", json!({"path": path.to_string_lossy()}));
+
+    let md = std::fs::read_to_string(&path).unwrap();
+    assert!(md.contains("![tiny](image.png)"), "the picture keeps a file name: {md}");
+    assert_eq!(std::fs::read(dir.join("image.png")).unwrap(), tiny_png(), "the picture file is saved beside the .md");
+
+    let reopened = crate::io::open_path(&path).unwrap();
+    assert_eq!(reopened.media.len(), 1, "the saved Markdown shows its picture again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn markdown_insert_from_file_keeps_its_name() {
+    // Inserting a picture from the Insert toolbar hands `insert.picture` a path. Saving the
+    // Markdown must reference that file's name, not the writer's generated `image.png`.
+    let dir = scratch_dir("wordcraft-md-insert-name");
+    let source = dir.join("photo.png");
+    std::fs::write(&source, tiny_png()).unwrap();
+
+    let mut session = s();
+    run(&mut session, "insert.picture", json!({"path": source.to_string_lossy()}));
+    let path = dir.join("page.md");
+    run(&mut session, "file.saveAs", json!({"path": path.to_string_lossy()}));
+
+    let md = std::fs::read_to_string(&path).unwrap();
+    assert!(md.contains("](photo.png)"), "the saved destination uses the source file name: {md}");
+    assert!(!md.contains("](image.png)"), "no fixed generated name: {md}");
+    assert_eq!(std::fs::read(dir.join("photo.png")).unwrap(), tiny_png(), "the picture is beside the .md");
+    let reopened = crate::io::open_path(&path).unwrap();
+    assert_eq!(reopened.media.len(), 1, "the saved Markdown shows its picture again");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn markdown_insert_from_another_folder_is_copied_beside_the_file() {
+    // A picture from elsewhere on the machine is copied to the .md's folder under its own name.
+    let dir = scratch_dir("wordcraft-md-insert-copy");
+    let elsewhere = scratch_dir("wordcraft-md-insert-elsewhere");
+    let source = elsewhere.join("Desk Photo.png");
+    std::fs::write(&source, tiny_png()).unwrap();
+
+    let mut session = s();
+    run(&mut session, "insert.picture", json!({"path": source.to_string_lossy()}));
+    let path = dir.join("page.md");
+    run(&mut session, "file.saveAs", json!({"path": path.to_string_lossy()}));
+
+    let md = std::fs::read_to_string(&path).unwrap();
+    assert!(md.contains("](Desk%20Photo.png)"), "the destination encodes the file name: {md}");
+    assert_eq!(std::fs::read(dir.join("Desk Photo.png")).unwrap(), tiny_png(), "the picture was copied beside the .md");
+    let reopened = crate::io::open_path(&path).unwrap();
+    assert_eq!(reopened.media.len(), 1, "the copied Markdown shows its picture again");
+    let _ = std::fs::remove_dir_all(&dir);
+    let _ = std::fs::remove_dir_all(&elsewhere);
+}
+
 /// A fresh, empty scratch folder for one test.
 #[cfg(not(target_arch = "wasm32"))]
 fn scratch_dir(name: &str) -> std::path::PathBuf {
