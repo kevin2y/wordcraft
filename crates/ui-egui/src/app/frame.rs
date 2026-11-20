@@ -80,6 +80,11 @@ impl WordApp {
         let window = self.windows.shown();
         let moved = |app: &WordApp| app.windows.shown() != window;
         if self.ui.backstage {
+            // The tab strip stays on screen so the fixed WordCraft tab shows as selected. macOS
+            // keeps its backstage band in place of the strip, beside the traffic lights.
+            if !self.integrated_titlebar {
+                chrome::title_bar(self, ui);
+            }
             backstage::show(self, ui);
         } else if !self.has_document() {
             // No document open (#1129): the ribbon greyed out but for Help, and no page.

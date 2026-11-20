@@ -845,3 +845,77 @@ fn status_bar_texts_never_overlap_controls_on_cache_miss_with_single_pass() {
         }
     }
 }
+
+/// The fixed WordCraft tab opens the File page; the document tab beside it returns to the page.
+#[test]
+fn the_wordcraft_tab_opens_file_and_the_document_tab_returns() {
+    let ctx = ctx();
+    let (mut n, mut a) = (0, WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default()));
+    frame(&ctx, &mut n, vec![], &mut a);
+    let nodes = labelled_scaled(&mut a, 1440.0, 1.0, title_bar);
+    let (_, left, right) = nodes.iter().find(|(l, ..)| l == "WordCraft").expect("the fixed tab is named WordCraft");
+    click(&ctx, &mut n, pos2(((left + right) / 2.0) as f32, 19.0), &mut a);
+    assert!(a.ui.backstage, "the WordCraft tab opens the File page");
+
+    let nodes = labelled_scaled(&mut a, 1440.0, 1.0, title_bar);
+    let (_, left, _) = nodes.iter().find(|(l, ..)| l.contains("Document1")).expect("the document tab stays drawn");
+    click(&ctx, &mut n, pos2((*left + 12.0) as f32, 19.0), &mut a);
+    assert!(!a.ui.backstage, "the document tab returns to the page");
+}
+
+/// The Start screen's stand-in blank document is not a document tab: only the File page and the
+/// `+` are shown until the person actually creates or opens one.
+#[test]
+fn start_screen_has_no_placeholder_document_tab() {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+    assert!(a.start_screen());
+    assert!(!a.has_document());
+    assert_eq!(a.tab_count(), 0, "the stand-in is not a tab");
+    let labels = labelled_scaled(&mut a, 1440.0, 1.0, title_bar);
+    assert!(labels.iter().any(|(l, ..)| l == "WordCraft"), "the File tab is drawn: {labels:?}");
+    assert!(labels.iter().any(|(l, ..)| l == "New Document"), "the + still starts a document: {labels:?}");
+    assert!(!labels.iter().any(|(l, ..)| l.contains("Document1") || l.contains("Not saved")), "no placeholder document tab: {labels:?}");
+
+    a.run("file.new", json!({})).unwrap();
+    let labels = labelled_scaled(&mut a, 1440.0, 1.0, title_bar);
+    assert!(labels.iter().any(|(l, ..)| l.contains("Document1")), "a real new document gets a tab: {labels:?}");
+}
+
+/// Without the OS title bar the tab strip draws its own caption buttons; macOS keeps its lights.
+#[test]
+fn caption_buttons_are_drawn_only_on_a_borderless_window() {
+    let mut a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+    let labels = labelled_scaled(&mut a, 1440.0, 1.0, title_bar);
+    for name in ["Minimize window", "Maximize window", "Close window"] {
+        assert!(labels.iter().any(|(l, ..)| l == name), "{name} is drawn: {labels:?}");
+    }
+    a.integrated_titlebar = true;
+    let labels = labelled_scaled(&mut a, 1440.0, 1.0, title_bar);
+    assert!(!labels.iter().any(|(l, ..)| l == "Close window"), "macOS uses the traffic lights: {labels:?}");
+}
+
+/// The invisible strips over a borderless window's edges start a native resize, not a window drag.
+#[test]
+fn a_drag_on_the_window_edge_begins_a_resize() {
+    let ctx = ctx();
+    let a = WordApp::new(wordcraft_engine::Session::new(wordcraft_doc::Document::new()), crate::Services::default());
+    let mut n = 0;
+    let input = |events: Vec<egui::Event>, n: u32| egui::RawInput {
+        time: Some(f64::from(n) / 60.0),
+        predicted_dt: 1.0 / 60.0,
+        screen_rect: Some(Rect::from_min_size(egui::Pos2::ZERO, vec2(800.0, 600.0))),
+        events,
+        ..Default::default()
+    };
+    let mut resizing = false;
+    for events in [
+        vec![egui::Event::PointerMoved(pos2(2.0, 2.0))],
+        vec![egui::Event::PointerButton { pos: pos2(2.0, 2.0), button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() }],
+        vec![egui::Event::PointerMoved(pos2(6.0, 6.0))],
+    ] {
+        n += 1;
+        let out = ctx.run_ui(input(events, n), |ui| window_edges(&a, ui));
+        resizing |= out.viewport_output.values().flat_map(|v| v.commands.iter()).any(|c| matches!(c, egui::ViewportCommand::BeginResize(_)));
+    }
+    assert!(resizing, "the edge drag asks egui to resize the viewport");
+}

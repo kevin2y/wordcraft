@@ -50,8 +50,11 @@ pub(crate) struct Window {
     /// [`WindowId`] once the frame's drawing ends.
     key: u64,
     id: Option<WindowId>,
-    /// The document it shows.
+    /// The document it shows. It is one of `tabs`, kept here as the active tab's id because
+    /// most of the window code (titles, focus, requests) asks for "the document of this window".
     doc: u64,
+    /// Every document shown as a tab in this window, in opening order.
+    tabs: Vec<u64>,
     /// Its state while another window's is in [`WordApp`]'s fields; `None` for that window.
     ui: Option<Box<WindowUi>>,
     /// Requests commands made for its document while another window was drawn
@@ -108,7 +111,7 @@ impl Windows {
             native: cfg!(not(target_arch = "wasm32")),
             list,
             viewports: Some(viewports),
-            open: vec![Window { key: 1, id: Some(id), doc, ui: None, requests: Vec::new(), title: String::new(), view: None }],
+            open: vec![Window { key: 1, id: Some(id), doc, tabs: vec![doc], ui: None, requests: Vec::new(), title: String::new(), view: None }],
             shown: 1,
             next_key: 2,
             showing: false,
@@ -151,9 +154,62 @@ impl Windows {
         self.open.iter_mut().find(|w| w.key == key)
     }
 
-    /// The window showing document `doc`, the most recently focused if several do.
+    /// The window with document `doc` as a tab, the most recently focused if several do.
     fn of_doc(&self, doc: u64) -> Option<u64> {
-        self.recent_keys().into_iter().find(|&k| self.get(k).is_some_and(|w| w.doc == doc))
+        self.recent_keys().into_iter().find(|&k| self.get(k).is_some_and(|w| w.tabs.contains(&doc)))
+    }
+
+    /// The window other than `except` with document `doc` as a tab. A document can be a tab in
+    /// several windows; filtering the result of `of_doc` would miss an older window when the
+    /// current one also happens to show it.
+    fn of_doc_except(&self, doc: u64, except: u64) -> Option<u64> {
+        self.recent_keys().into_iter().find(|&k| k != except && self.get(k).is_some_and(|w| w.tabs.contains(&doc)))
+    }
+
+    /// Whether any window has `doc` as a tab.
+    fn has_tab(&self, doc: u64) -> bool {
+        self.open.iter().any(|w| w.tabs.contains(&doc))
+    }
+
+    /// The window's tabs, in opening order.
+    pub(crate) fn tab_docs(&self, key: u64) -> Vec<u64> {
+        self.get(key).map(|w| w.tabs.clone()).unwrap_or_default()
+    }
+
+    /// Whether a window shows more than one document as a tab.
+    pub(crate) fn any_window_is_tabbed(&self) -> bool {
+        self.open.iter().any(|w| w.tabs.len() > 1)
+    }
+
+    /// Add `doc` as a tab of window `key`, if it isn't there already.
+    fn add_tab(&mut self, key: u64, doc: u64) -> bool {
+        if let Some(w) = self.get_mut(key)
+            && !w.tabs.contains(&doc)
+        {
+            w.tabs.push(doc);
+            return true;
+        }
+        false
+    }
+
+    /// Stop showing `doc` as a tab. The Start screen and an empty window keep the session's
+    /// stand-in document, but it is not a document the person can switch to or edit.
+    pub(crate) fn remove_tab(&mut self, doc: u64) {
+        for w in &mut self.open {
+            w.tabs.retain(|&d| d != doc);
+        }
+    }
+
+    /// Make `doc` the active tab of window `key`. While another window is drawn its saved state
+    /// has to change too: `enter_window` reads `WindowUi::shown_document` to know which document
+    /// it is bringing in.
+    fn select_tab(&mut self, key: u64, doc: u64) {
+        if let Some(w) = self.get_mut(key) {
+            w.doc = doc;
+            if let Some(ui) = w.ui.as_mut() {
+                ui.shown_document = doc;
+            }
+        }
     }
 
     /// Open windows, most recently focused first; windows opened during this frame's drawing
@@ -177,6 +233,14 @@ impl Windows {
             return None;
         }
         self.recent_keys().into_iter().find(|&k| k != key).and_then(|k| self.get(k)).map(|w| w.doc)
+    }
+
+    /// The next tab of window `key` after its active one, wrapping around. Closing a tab shows
+    /// its neighbour instead of leaving the window with the Start screen.
+    fn next_tab(&self, key: u64) -> Option<u64> {
+        let w = self.get(key)?;
+        let pos = w.tabs.iter().position(|&d| d == w.doc)?;
+        w.tabs.get(pos + 1).or_else(|| w.tabs.first()).copied()
     }
 
     /// The window's viewport.
@@ -303,6 +367,11 @@ impl WordApp {
         if self.windows.native { self.windows.open.len() } else { 1 }
     }
 
+    /// How many document tabs the drawn window shows.
+    pub fn tab_count(&self) -> usize {
+        self.windows.tab_docs(self.windows.shown).len()
+    }
+
     /// The egui viewport of the active window, the one focused last: control input,
     /// `ui.screenshot`, `ui.resize` and the saved window geometry are its. The root viewport
     /// when the windows don't have viewports of their own (the web app, embedded viewports).
@@ -399,7 +468,7 @@ impl WordApp {
     /// without a view of its own), and `view` takes its place, made valid for edits made since.
     fn swap_view_in(&mut self, key: u64, doc: u64, view: WindowView) {
         let held = self.session.take_view();
-        if let Some(owner) = self.windows.open.iter_mut().find(|w| w.key != key && w.doc == doc && w.view.is_none()) {
+        if let Some(owner) = self.windows.open.iter_mut().find(|w| w.key != key && w.tabs.contains(&doc) && w.view.is_none()) {
             owner.view = Some(held);
         }
         self.session.put_view(view);
@@ -416,7 +485,7 @@ impl WordApp {
         // Faces borrowed for the interface (non-Latin file names) stay installed.
         state.canvas.ime_faces = self.canvas.ime_faces.clone();
         self.ui.backstage = false;
-        self.windows.open.push(Window { key, id: None, doc, ui: Some(state), requests: Vec::new(), title: String::new(), view });
+        self.windows.open.push(Window { key, id: None, doc, tabs: vec![doc], ui: Some(state), requests: Vec::new(), title: String::new(), view });
         self.enter_window(key);
         self.focus_window(key);
     }
@@ -439,7 +508,7 @@ impl WordApp {
     pub(crate) fn other_window_on_document(&self) -> Option<u64> {
         let shown = self.windows.shown;
         let doc = self.windows.get(shown)?.doc;
-        if !self.windows.native || !self.windows.open.iter().any(|w| w.key != shown && w.doc == doc) {
+        if !self.windows.native || !self.windows.open.iter().any(|w| w.key != shown && w.tabs.contains(&doc)) {
             return None;
         }
         self.windows.recent_keys().into_iter().find(|&k| k != shown)
@@ -490,25 +559,30 @@ impl WordApp {
         }
     }
 
-    /// Keep a window for every open document: windows whose document closed (an agent closed it)
-    /// close, and documents with no window (an agent made one while another was active) get one
-    /// behind the others. The active document is left to [`WordApp::sync_document`].
+    /// Keep every open document in a tab: windows whose tabs all closed (an agent closed them)
+    /// close, documents with no tab (an agent made one while another was active) join the drawn
+    /// window. View › New Window still makes another window, with its own copy of a tab. The
+    /// active document is left to [`WordApp::sync_document`].
     pub(crate) fn prune_windows(&mut self) {
         let shown = self.windows.shown;
+        let placeholder = self.no_document;
         let session = &self.session;
         let before = self.windows.open.len();
-        self.windows.open.retain(|w| w.key == shown || session.is_open(w.doc));
+        for w in &mut self.windows.open {
+            w.tabs.retain(|d| session.is_open(*d) && Some(*d) != placeholder);
+        }
+        self.windows.open.retain(|w| w.key == shown || !w.tabs.is_empty());
         let mut changed = self.windows.open.len() != before;
         let active = self.session.document_id();
         for d in self.session.documents() {
-            if d.id == active || Some(d.id) == self.no_document || d.id == self.shown_document || self.windows.of_doc(d.id).is_some() {
+            if Some(d.id) == placeholder || d.id == self.shown_document || self.windows.has_tab(d.id) {
                 continue;
             }
-            let key = self.windows.next_key;
-            self.windows.next_key = self.windows.next_key.saturating_add(1);
-            let mut state = Box::new(WindowUi::new(d.id));
-            state.canvas.ime_faces = self.canvas.ime_faces.clone();
-            self.windows.open.push(Window { key, id: None, doc: d.id, ui: Some(state), requests: Vec::new(), title: String::new(), view: None });
+            if self.windows.add_tab(shown, d.id) {
+                changed = true;
+            }
+        }
+        if Some(active) != placeholder && !self.windows.has_tab(active) && self.windows.add_tab(shown, active) {
             changed = true;
         }
         if changed {
@@ -517,27 +591,33 @@ impl WordApp {
     }
 
     /// [`WordApp::sync_document`] with native windows: the session's active document `id` isn't
-    /// the drawn window's. Another open document shows in its window, which comes to the front,
-    /// or in a new window; when the drawn window's document has closed, its window closes and the
-    /// one showing `id` comes forward. The Start screen's empty window stays beside the window
-    /// that shows `id`. False when the window itself is to show `id` instead: its document was
-    /// replaced, or it is the Start screen's empty window and no other window shows `id`.
+    /// the drawn window's active tab. Another window already showing it as a tab comes forward
+    /// with that tab selected; otherwise `id` becomes a new tab in the drawn window. False when
+    /// that window itself is to show `id` instead (`sync_document` does the in-place switch).
     pub(crate) fn follow_in_windows(&mut self, id: u64) -> bool {
         let left = self.shown_document;
-        let stand_in = self.no_document == Some(left);
+        if self.windows.get(self.windows.shown).is_some_and(|w| w.tabs.contains(&id)) {
+            return false;
+        }
         let other = self.windows.of_doc(id).filter(|&k| k != self.windows.shown);
         if self.session.is_open(left) {
-            match other {
-                Some(key) if self.enter_window(key) => self.focus_window(key),
-                _ if stand_in => return false,
-                _ => self.open_window(id, None),
+            if let Some(key) = other {
+                self.windows.select_tab(key, id);
+                if self.enter_window(key) {
+                    self.focus_window(key);
+                    return true;
+                }
             }
-            return true;
+            // A new document (or a document made active by a script) joins the drawn window.
+            self.windows.add_tab(self.windows.shown, id);
+            return false;
         }
         if let Some(key) = other {
+            self.windows.select_tab(key, id);
             self.close_shown_window(key);
             return true;
         }
+        self.windows.add_tab(self.windows.shown, id);
         false
     }
 
@@ -546,15 +626,19 @@ impl WordApp {
         let shown = self.windows.shown;
         if let Some(w) = self.windows.get_mut(shown) {
             w.doc = id;
+            if !w.tabs.contains(&id) {
+                w.tabs.push(id);
+            }
         }
     }
 
-    /// Close the active document. With windows, its window closes and the window focused before
-    /// it comes forward; else the window shows the next document. The session leaves a new blank
+    /// Close the active document. Its tab is taken out with it; the next tab comes forward, or
+    /// the next window's document when there is no neighbour. The session leaves a new blank
     /// document when it was the last.
     pub(crate) fn close_shown_document(&mut self) -> Result<(), String> {
         let doc = self.session.document_id();
-        let next = self.windows.next_doc(self.windows.shown);
+        let key = self.windows.shown;
+        let next = self.windows.next_tab(key).filter(|d| self.session.is_open(*d) && *d != doc).or_else(|| self.windows.next_doc(key));
         self.session.close_document(doc).map_err(|e| e.to_string())?;
         if let Some(next) = next
             && self.session.is_open(next)
@@ -574,7 +658,7 @@ impl WordApp {
         if !self.windows.native {
             return false;
         }
-        let Some(key) = self.windows.of_doc(document).filter(|&k| k != self.windows.shown) else { return false };
+        let Some(key) = self.windows.of_doc_except(document, self.windows.shown) else { return false };
         if let Some(w) = self.windows.get_mut(key) {
             w.requests.push(req.clone());
         }
@@ -605,6 +689,20 @@ impl WordApp {
         if self.enter_window(key) {
             self.focus_window(key);
         }
+    }
+
+    /// The documents shown as tabs in the drawn window, in opening order.
+    pub(crate) fn tab_docs(&self) -> Vec<u64> {
+        self.windows.tab_docs(self.windows.shown)
+    }
+
+    /// Close a tab. Bringing a background tab forward first means the same Save Changes prompt
+    /// and the same close path run as for the active tab's ×.
+    pub(crate) fn close_tab(&mut self, id: u64) -> Result<Value, String> {
+        if id != self.session.document_id() {
+            self.show_document(id)?;
+        }
+        self.run("file.close", json!({}))
     }
 
     /// The drawn window's title: its document's name as View › Window › Switch Windows gives it.

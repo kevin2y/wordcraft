@@ -219,8 +219,12 @@ impl WordApp {
         if self.ui.start_screen {
             self.ui.backstage = true;
             self.ui.backstage_page = "home".into();
-            self.no_document = Some(self.session.document_id());
+            let placeholder = self.session.document_id();
+            self.no_document = Some(placeholder);
             self.session.release_untitled_name();
+            // The stand-in document keeps the session valid, but the new tab strip must not
+            // expose an uneditable Document1 tab beside the File page.
+            self.windows.remove_tab(placeholder);
         }
         self.ui.start_screen
     }
@@ -519,6 +523,8 @@ impl WordApp {
         }
         self.paint_window(ui, &ctx, t);
         if !moved(self) {
+            // A borderless window has no OS resize border: draw the strips over the content.
+            crate::chrome::window_edges(self, ui);
             self.show_overlays(ui, &ctx);
         }
         if !moved(self) {

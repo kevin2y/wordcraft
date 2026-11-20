@@ -338,23 +338,50 @@ pub(crate) fn title_drag_rect(ctx: &egui::Context) -> Option<Rect> {
     ctx.data(|d| d.get_temp::<(Rect, u64)>(key)).filter(|(_, p)| *p == pass).map(|(r, _)| r)
 }
 
-/// Stable ids for the document-tab controls: interactions need the same id on the next frame.
-fn tab_id(ui: &Ui) -> egui::Id {
-    ui.scope_id().with("document_tab")
+/// Stable ids for the tab-strip controls: interactions need the same id on the next frame.
+fn home_tab_id(ui: &Ui) -> egui::Id {
+    ui.scope_id().with("wordcraft_tab")
+}
+
+fn tab_id(ui: &Ui, doc: u64) -> egui::Id {
+    ui.scope_id().with(("document_tab", doc))
 }
 
 fn new_tab_id(ui: &Ui) -> egui::Id {
     ui.scope_id().with("new_document_tab")
 }
 
-fn close_tab_id(ui: &Ui) -> egui::Id {
-    ui.scope_id().with("close_document_tab")
+fn close_tab_id(ui: &Ui, doc: u64) -> egui::Id {
+    ui.scope_id().with(("close_document_tab", doc))
 }
 
-/// The title bar as a document tab strip (WPS style): one tab for the current document and a `+`
-/// for a new one, with the rest of the band free to drag the window. AutoSave, the Quick Access
-/// Toolbar and the ribbon's tabs share the band below it ([`crate::ribbon::show`]). Search, the
-/// account button and the community link live in Backstage and Full Screen's command bar instead.
+/// A document tab's accessible name, as the centred window title used to describe it.
+fn document_tab_title(app: &WordApp, info: &wordcraft_engine::DocInfo) -> String {
+    // "PDF" is a format name, so it needs no translation. Only the shown document's PDF view is
+    // known without asking the engine for every tab's format.
+    let kind = if info.active && app.session.pdf.is_some() { " (PDF)" } else { "" };
+    format!(
+        "{}{kind} — {}",
+        crate::i18n::isolate(&info.title),
+        if info.dirty {
+            tl!("Edited")
+        } else if info.path.is_some() {
+            tl!("Saved")
+        } else {
+            tl!("Not saved")
+        }
+    )
+}
+
+fn window_button_id(ui: &Ui, which: &str) -> egui::Id {
+    ui.scope_id().with(("window_button", which))
+}
+
+/// The title bar as a tab strip (WPS style): a fixed WordCraft tab for the File page, one tab for
+/// every document in this window, and a `+` for a new one. On a borderless window the right end
+/// draws the minimise/maximize/close buttons; everywhere the empty band drags the window.
+/// AutoSave, the Quick Access Toolbar and the ribbon's tabs share the band below it
+/// ([`crate::ribbon::show`]).
 pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
     let t = Tokens::get(ui.ctx());
     // macOS: shorter, so the system's traffic lights are centred in it; the tallest controls
@@ -363,17 +390,19 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
     let bar = app.mac_titlebar;
     let left = if mac { bar.content_left as i8 } else { 8 };
     let control_h = if mac { 22.0 } else { 26.0 };
+    // Without the OS title bar the window needs its own caption buttons.
+    let button_w = 38.0;
+    let buttons_w = if mac { 0.0 } else { button_w * 3.0 };
     egui::Panel::top("title_bar")
         .exact_size(if mac { bar.height } else { 38.0 })
         .frame(egui::Frame::NONE.fill(t.title_bar).inner_margin(egui::Margin { left, right: 10, top: 0, bottom: 0 }))
         .show(ui, |ui| {
             let full = ui.max_rect();
-            // Drag the window by the empty part of the tab strip (integrated title bar on macOS).
+            // Drag the window by the empty part of the tab strip.
             let drag = ui.interact(full, ui.scope_id().with("title_drag"), Sense::click_and_drag());
             if drag.drag_started() {
                 ui.ctx().send_viewport_cmd(egui::ViewportCommand::StartDrag);
             }
-            // Elsewhere the system's own title bar above this one moves the window.
             if mac {
                 note_title_drag(ui.ctx(), full);
             }
@@ -385,63 +414,83 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                 ui.horizontal_centered(|ui| {
                     ui.spacing_mut().item_spacing = vec2(0.0, 0.0);
                     // macOS keeps the traffic-light/back-chevron zone clear. The strip still
-                    // drags the window; only the tab itself starts beyond that reserved space.
+                    // drags the window; only the tabs start beyond that reserved space.
                     if mac {
                         ui.add_space(24.0);
                     }
-                    // The one open document as a tab. Its accessible name keeps the document's
-                    // state, as the centred title did: tests and screen readers describe it in full.
-                    let title = if !app.has_document() {
-                        "WordCraft".to_string()
-                    } else {
-                        // "PDF" is a format name, so it needs no translation.
-                        let kind = if app.session.pdf.is_some() { " (PDF)" } else { "" };
-                        format!(
-                            "{}{kind} — {}",
-                            crate::i18n::isolate(&app.title_stem()),
-                            if app.session.dirty {
-                                tl!("Edited")
-                            } else if app.session.path.is_some() {
-                                tl!("Saved")
-                            } else {
-                                tl!("Not saved")
-                            }
-                        )
-                    };
                     let font = TypeRung::Chrome.semibold();
                     let track = TypeRung::Chrome.tracking();
-                    // Keep room for the tab's padding and close × (16 + 24), the 6 pt gap and the
-                    // 24 pt new-tab button: 70 pt in all, so the button never runs off the window.
-                    let room = (ui.available_width() - if app.has_document() { 70.0 } else { 40.0 }).max(0.0);
-                    let mut shown: String = title.chars().take(240).collect();
-                    if text_width(ui.painter(), &shown, &font, track, t.text) > room {
-                        while !shown.is_empty() && text_width(ui.painter(), &format!("{shown}…"), &font, track, t.text) > room {
-                            shown.pop();
-                        }
-                        shown.push('…');
-                    }
-                    let w = text_width(ui.painter(), &shown, &font, track, t.text).min(room);
-                    let tab_w = w + 16.0 + if app.has_document() { 24.0 } else { 0.0 };
-                    let (r, _) = ui.allocate_exact_size(vec2(tab_w, control_h + 6.0), Sense::hover());
-                    let resp = ui.interact(r, tab_id(ui), Sense::click());
-                    let active = app.has_document();
-                    ui.painter().rect_filled(r, 5.0, if active { t.ribbon } else { t.title_bar });
+                    // WordCraft is a product name: it needs no translation and never shrinks.
+                    let home = "WordCraft";
+                    let home_w = text_width(ui.painter(), home, &font, track, t.text) + 16.0;
+                    let (home_r, _) = ui.allocate_exact_size(vec2(home_w, control_h + 6.0), Sense::hover());
+                    let home_resp = ui.interact(home_r, home_tab_id(ui), Sense::click());
+                    let home_active = app.ui.backstage;
+                    ui.painter().rect_filled(home_r, 5.0, if home_active { t.ribbon } else { t.title_bar });
                     paint_text(
                         ui.painter(),
-                        pos2(r.min.x + 8.0, r.center().y - TypeRung::Chrome.line_height() / 2.0),
+                        pos2(home_r.min.x + 8.0, home_r.center().y - TypeRung::Chrome.line_height() / 2.0),
                         Align2::LEFT_TOP,
-                        &shown,
+                        home,
                         &font,
                         track,
                         t.text,
                     );
-                    resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, active, &title));
-                    if resp.on_hover_text(tl!("Rename Document")).clicked() && active {
-                        let _ = app.run("file.rename", json!({}));
+                    home_resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, home_active, home));
+                    if home_resp.on_hover_text(tl!("File")).clicked() {
+                        let _ = app.run("ui.backstage", json!({"value": true}));
                     }
-                    if active {
+                    ui.add_space(6.0);
+
+                    // The tabs belong to this window; the session supplies their names and state.
+                    let all = app.session.documents();
+                    let infos: Vec<_> = app.tab_docs().into_iter().filter_map(|id| all.iter().find(|d| d.id == id).cloned()).collect();
+                    let gap = 6.0;
+                    let avail = ui.available_width();
+                    let slot = if infos.is_empty() {
+                        0.0
+                    } else {
+                        // Leave room for `+`, the caption buttons and the gaps, then share what is
+                        // left evenly. Tabs wider than 260 pt leave the rest as drag space.
+                        ((avail - 24.0 - buttons_w - 8.0 - gap * (infos.len() as f32 + 1.0)) / infos.len() as f32).clamp(0.0, 260.0)
+                    };
+                    for info in &infos {
+                        let title = document_tab_title(app, info);
+                        let mut shown: String = title.chars().take(240).collect();
+                        let text_room = (slot - 40.0).max(0.0);
+                        if text_width(ui.painter(), &shown, &font, track, t.text) > text_room {
+                            while !shown.is_empty() && text_width(ui.painter(), &format!("{shown}…"), &font, track, t.text) > text_room {
+                                shown.pop();
+                            }
+                            shown.push('…');
+                        }
+                        let w = text_width(ui.painter(), &shown, &font, track, t.text).min(text_room);
+                        let tab_w = w + 40.0;
+                        let (r, _) = ui.allocate_exact_size(vec2(tab_w, control_h + 6.0), Sense::hover());
+                        let resp = ui.interact(r, tab_id(ui, info.id), Sense::click());
+                        let active = info.active && !app.ui.backstage;
+                        ui.painter().rect_filled(r, 5.0, if active { t.ribbon } else { t.title_bar });
+                        paint_text(
+                            ui.painter(),
+                            pos2(r.min.x + 8.0, r.center().y - TypeRung::Chrome.line_height() / 2.0),
+                            Align2::LEFT_TOP,
+                            &shown,
+                            &font,
+                            track,
+                            if active { t.text } else { t.text_dim },
+                        );
+                        resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Tab, true, active, &title));
+                        if resp.on_hover_text(tl!("Rename Document")).clicked() {
+                            if app.ui.backstage {
+                                let _ = app.run("ui.backstage", json!({"value": false}));
+                            } else if info.active {
+                                let _ = app.run("file.rename", json!({}));
+                            } else {
+                                let _ = app.show_document(info.id);
+                            }
+                        }
                         let close = Rect::from_center_size(pos2(r.max.x - 12.0, r.center().y), vec2(18.0, 18.0));
-                        let close_resp = ui.interact(close, close_tab_id(ui), Sense::click());
+                        let close_resp = ui.interact(close, close_tab_id(ui, info.id), Sense::click());
                         // A distinct name keeps the tab control out of dialog "Close" lookups.
                         close_resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, true, tl!("Close Document")));
                         ui.painter().text(
@@ -452,12 +501,12 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                             if close_resp.hovered() { t.text } else { t.text_dim },
                         );
                         if close_resp.on_hover_text(tl!("Close Document")).clicked() {
-                            let _ = app.run("file.close", json!({}));
+                            let _ = app.close_tab(info.id);
                         }
+                        ui.add_space(gap + (slot - tab_w).max(0.0));
                     }
-                    ui.add_space(6.0);
-                    // A `+` opens a new document (a new native window while one window holds one
-                    // document); the tab strip will grow into it when documents share a window.
+
+                    // A `+` opens a new document in this window, as another tab.
                     let (r, _) = ui.allocate_exact_size(vec2(24.0, control_h), Sense::hover());
                     let resp = ui.interact(r, new_tab_id(ui), Sense::click());
                     if resp.hovered() {
@@ -468,9 +517,116 @@ pub fn title_bar(app: &mut WordApp, ui: &mut Ui) {
                     if resp.on_hover_text(tl!("New Document")).clicked() {
                         let _ = app.run("file.new", json!({}));
                     }
+                    if !mac {
+                        // Push the caption buttons to the far side, keeping their own width.
+                        ui.add_space((ui.available_width() - buttons_w).max(0.0));
+                        window_buttons(ui, t);
+                    }
                 });
             });
         });
+}
+
+/// The caption buttons of a borderless window: minimise, maximize/restore, close. Simple strokes
+/// rather than glyphs, so they need no font coverage and follow the theme's icon colour.
+fn window_buttons(ui: &mut Ui, t: Tokens) {
+    let h = 38.0;
+    let w = 38.0;
+    let maximized = ui.input(|i| i.viewport().maximized.unwrap_or(false));
+    let items = [
+        ("minimize", true, "Minimize window"),
+        ("maximize", true, if maximized { "Restore window" } else { "Maximize window" }),
+        ("close", true, "Close window"),
+    ];
+    for (which, enabled, tip) in items {
+        let (r, _) = ui.allocate_exact_size(vec2(w, h), Sense::hover());
+        let resp = ui.interact(r, window_button_id(ui, which), Sense::click());
+        let hot = resp.hovered();
+        let closing = which == "close";
+        if hot {
+            let bg = if closing { if resp.is_pointer_button_down_on() { t.close_pressed } else { t.close_hover } } else { t.hover };
+            ui.painter().rect_filled(r, 0.0, bg);
+        }
+        // Match the native Windows caption glyphs: 10 pt marks with a 1 pt stroke, not the
+        // heavier 12–13 pt shapes. The hit area stays 38 pt so the buttons are still easy to click.
+        let ink = if !enabled {
+            t.text_disabled
+        } else if closing && hot {
+            t.on_close
+        } else if hot {
+            t.text
+        } else {
+            t.text_dim
+        };
+        let c = r.center();
+        let stroke = Stroke::new(1.0, ink);
+        match which {
+            "minimize" => {
+                ui.painter().line_segment([pos2(c.x - 5.0, c.y + 5.0), pos2(c.x + 5.0, c.y + 5.0)], stroke);
+            }
+            "maximize" if !maximized => {
+                ui.painter().rect_stroke(Rect::from_center_size(c, vec2(10.0, 10.0)), 0.0, stroke, egui::StrokeKind::Outside);
+            }
+            "close" => {
+                ui.painter().line_segment([pos2(c.x - 5.0, c.y - 5.0), pos2(c.x + 5.0, c.y + 5.0)], stroke);
+                ui.painter().line_segment([pos2(c.x + 5.0, c.y - 5.0), pos2(c.x - 5.0, c.y + 5.0)], stroke);
+            }
+            // Restoring from maximized draws two offset frames, as the system title bar does.
+            _ => {
+                let back = Rect::from_center_size(pos2(c.x + 1.5, c.y - 1.5), vec2(10.0, 10.0));
+                let front = Rect::from_center_size(pos2(c.x - 1.5, c.y + 1.5), vec2(10.0, 10.0));
+                ui.painter().line_segment([back.left_top(), back.right_top()], stroke);
+                ui.painter().line_segment([back.right_top(), back.right_bottom()], stroke);
+                ui.painter().rect_stroke(front, 0.0, stroke, egui::StrokeKind::Outside);
+            }
+        }
+        resp.widget_info(|| egui::WidgetInfo::labeled(egui::Role::Button, enabled, tip));
+        if enabled && resp.on_hover_text(tip).clicked() {
+            match which {
+                "minimize" => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Minimized(true)),
+                "maximize" => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Maximized(!maximized)),
+                _ => ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close),
+            }
+        }
+    }
+}
+
+/// Thin, invisible resize strips around a borderless window. The OS supplies these with a native
+/// frame; the custom frame has to start a native resize itself when a strip is dragged.
+pub(crate) fn window_edges(app: &WordApp, ui: &mut Ui) {
+    if app.integrated_titlebar {
+        return;
+    }
+    // The window's true edges, not the content rect inset by the root margin: the strips must
+    // sit outside the tab strip's drag band.
+    let r = ui.input(|i| i.viewport_rect());
+    const E: f32 = 4.0;
+    const STRIPS: [(&str, egui::viewport::ResizeDirection); 8] = [
+        ("n", egui::viewport::ResizeDirection::North),
+        ("s", egui::viewport::ResizeDirection::South),
+        ("w", egui::viewport::ResizeDirection::West),
+        ("e", egui::viewport::ResizeDirection::East),
+        ("nw", egui::viewport::ResizeDirection::NorthWest),
+        ("ne", egui::viewport::ResizeDirection::NorthEast),
+        ("sw", egui::viewport::ResizeDirection::SouthWest),
+        ("se", egui::viewport::ResizeDirection::SouthEast),
+    ];
+    for (name, dir) in STRIPS {
+        let rect = match name {
+            "n" => Rect::from_min_max(pos2(r.min.x, r.min.y), pos2(r.max.x, r.min.y + E)),
+            "s" => Rect::from_min_max(pos2(r.min.x, r.max.y - E), pos2(r.max.x, r.max.y)),
+            "w" => Rect::from_min_max(pos2(r.min.x, r.min.y), pos2(r.min.x + E, r.max.y)),
+            "e" => Rect::from_min_max(pos2(r.max.x - E, r.min.y), pos2(r.max.x, r.max.y)),
+            "nw" => Rect::from_min_max(r.min, pos2(r.min.x + E, r.min.y + E)),
+            "ne" => Rect::from_min_max(pos2(r.max.x - E, r.min.y), pos2(r.max.x, r.min.y + E)),
+            "sw" => Rect::from_min_max(pos2(r.min.x, r.max.y - E), pos2(r.min.x + E, r.max.y)),
+            _ => Rect::from_min_max(pos2(r.max.x - E, r.max.y - E), r.max),
+        };
+        let resp = ui.interact(rect, ui.scope_id().with(("window_edge", name)), Sense::drag());
+        if resp.drag_started() {
+            ui.ctx().send_viewport_cmd(egui::ViewportCommand::BeginResize(dir));
+        }
+    }
 }
 
 /// Widths for Search in Full Screen's command bar, which is the only place the box is drawn now

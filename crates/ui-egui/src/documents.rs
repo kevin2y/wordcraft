@@ -257,17 +257,19 @@ pub(crate) fn untitled_title(english: &str) -> Option<String> {
 /// brings that window to the front (in one window, shows the document).
 pub(crate) fn switch_windows_menu(ui: &mut egui::Ui, app: &mut WordApp) {
     let native = app.windows.native();
-    let entries: Vec<(u64, String, bool)> = if native {
-        app.switch_windows_entries()
-    } else {
-        app.session.documents().into_iter().map(|d| (d.id, format!("{}{}", display_title(&d), if d.dirty { " •" } else { "" }), d.active)).collect()
-    };
-    for (key, label, current) in entries {
+    // With tabs, one window holds several documents: list the documents, not just the windows.
+    // Two windows on the same document still list the windows, so their `:1` / `:2` names and
+    // separate carets stay reachable.
+    let tabbed = native && app.windows.any_window_is_tabbed();
+    let documents: Vec<_> =
+        app.session.documents().into_iter().map(|d| (d.id, format!("{}{}", display_title(&d), if d.dirty { " •" } else { "" }), d.active)).collect();
+    let entries: Vec<(u64, String, bool)> = if native && !tabbed { app.switch_windows_entries() } else { documents };
+    for (id, label, current) in entries {
         if ui.add(egui::Button::selectable(current, label).min_size(egui::vec2(220.0, 0.0))).clicked() {
-            if native {
-                app.show_window(key);
+            if native && !tabbed {
+                app.show_window(id);
             } else {
-                let _ = app.run("view.switchWindows", json!({"id": key}));
+                let _ = app.show_document(id);
             }
             ui.close();
         }

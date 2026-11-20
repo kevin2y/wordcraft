@@ -10,7 +10,8 @@
 //! document unless the first line is `{"empty": true}`; `{"empty": true, "startScreen": true}`
 //! starts the way the desktop app does with nothing to open (File › Home, #766). A line
 //! `{"width": w}`, `{"height": h}` or `{"ppp": s}` sets the window size in points or its pixels
-//! per point (e.g. 1.45 for a 145 % desktop, to see text as it is drawn there).
+//! per point (e.g. 1.45 for a 145 % desktop, to see text as it is drawn there). `{"windowsChrome":
+//! true}` draws the borderless Windows/Linux title strip instead of the macOS variant.
 //! `{"demoPacks": true}` lists a few sample Language packs (installs only record themselves), and
 //! (with `{"network": true}` on a line, downloading is already on) `{"demoPacks": "store"}` uses a real font store, as the desktop app does, in a new temporary
 //! folder rather than the person's, or in `"storeDir"` given on the same line (with
@@ -53,7 +54,9 @@ fn main() {
         None => {}
     }
     let mut app = WordApp::new(Session::new(doc), Services::default()).with_control(rx);
-    app.integrated_titlebar = true;
+    // The default shot shows the macOS-style bar (traffic-light side reserved). `"windowsChrome"`
+    // renders the borderless Windows/Linux variant with the strip's own caption buttons.
+    app.integrated_titlebar = !lines.iter().any(|l| l.get("windowsChrome") == Some(&serde_json::Value::Bool(true)));
     if lines.first().is_some_and(|l| l.get("startScreen").is_some()) {
         app.start_screen();
     }

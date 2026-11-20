@@ -259,8 +259,10 @@ impl WordApp {
         self.close_shown_document()?;
         self.recovery_seen = true;
         if last {
-            self.no_document = Some(self.session.document_id());
+            let placeholder = self.session.document_id();
+            self.no_document = Some(placeholder);
             self.session.release_untitled_name();
+            self.windows.remove_tab(placeholder);
         }
         // The window that stays leaves the File page; another window that came forward keeps
         // its own.

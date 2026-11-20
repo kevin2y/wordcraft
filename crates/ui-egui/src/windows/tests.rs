@@ -95,10 +95,6 @@ fn focus(id: ViewportId) {
     });
 }
 
-fn sent(id: ViewportId, cmd: &ViewportCommand) -> bool {
-    COMMANDS.with(|c| c.borrow().get(&id).is_some_and(|v| v.contains(cmd)))
-}
-
 fn app(text: &str) -> WordApp {
     let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
     a.run("text.insert", json!({"text": text})).unwrap();
@@ -113,11 +109,10 @@ fn prompt(a: &WordApp) -> Option<&'static str> {
     a.dialog.as_ref().map(|d| d.name())
 }
 
-/// New opens the document in a second native window, focused, with a fresh interface; the
-/// first keeps its document, its ribbon tab and its open dialog, and gets them back when it
-/// is focused again.
+/// New opens the document as a second tab in the same window; both documents keep their text,
+/// while the dialog and ribbon tab belong to the window rather than to a document tab.
 #[test]
-fn new_opens_a_second_window_and_each_keeps_its_state() {
+fn new_opens_a_second_tab_and_each_keeps_its_state() {
     let ctx = backend();
     let mut a = app("First");
     let first = a.session.document_id();
@@ -129,29 +124,26 @@ fn new_opens_a_second_window_and_each_keeps_its_state() {
     a.run("file.new", json!({})).unwrap();
     let second = a.session.document_id();
     assert_ne!(second, first);
-    assert_eq!(a.window_count(), 2);
-    assert!(a.dialog.is_none() && a.ui.tab == crate::DEFAULT_TAB, "the new window starts afresh");
+    assert_eq!((a.window_count(), a.tab_count()), (1, 2));
+    assert!(a.dialog.is_none(), "the new tab has no dialog from the old document");
     frames(&ctx, &mut a, 3);
-    let child = a.active_viewport();
-    assert_ne!(child, ViewportId::ROOT, "the new window has a viewport of its own");
-    assert_eq!(DRAWN.with(|d| d.borrow().clone()), [child, ViewportId::ROOT], "both windows draw each frame");
+    assert_eq!(a.active_viewport(), ViewportId::ROOT, "the tab stays in the one window");
     frames(&ctx, &mut a, 3);
-    assert!(UPLOADS.with(|u| *u.borrow()) > 0, "the pages were rendered");
+    assert!(UPLOADS.with(|u| *u.borrow()) > 0, "the page was rendered");
     UPLOADS.with(|u| *u.borrow_mut() = 0);
     frames(&ctx, &mut a, 2);
-    assert_eq!(UPLOADS.with(|u| *u.borrow()), 0, "a window whose document didn't change renders no page again");
+    assert_eq!(UPLOADS.with(|u| *u.borrow()), 0, "an unchanged document renders no page again");
     assert!(a.sent_title.starts_with("Document2"), "{}", a.sent_title);
     assert_eq!(a.session.document_id(), second);
     a.run("text.insert", json!({"text": "Second"})).unwrap();
 
-    focus(ViewportId::ROOT);
+    a.show_document(first).unwrap();
     frames(&ctx, &mut a, 2);
-    assert_eq!(a.active_viewport(), ViewportId::ROOT);
     assert_eq!(a.session.document_id(), first);
-    assert_eq!((text(&a), a.ui.tab.as_str(), prompt(&a)), ("First".into(), "Insert", Some("paragraph")));
-    focus(child);
+    assert_eq!((text(&a), a.ui.tab.as_str(), prompt(&a)), ("First".into(), "Insert", None));
+    a.show_document(second).unwrap();
     frames(&ctx, &mut a, 2);
-    assert_eq!((text(&a), a.ui.tab.as_str(), prompt(&a)), ("Second".into(), crate::DEFAULT_TAB, None));
+    assert_eq!((text(&a), a.ui.tab.as_str(), prompt(&a)), ("Second".into(), "Insert", None));
 }
 
 fn docx_on_disk(name: &str, body: &str) -> std::path::PathBuf {
@@ -164,36 +156,34 @@ fn docx_on_disk(name: &str, body: &str) -> std::path::PathBuf {
     path
 }
 
-/// Open of a file a window already shows brings that window to the front; Open with only an
-/// untouched blank document open replaces it in its own window.
+/// Open of a file already shown in a tab brings that tab forward; Open with only an untouched
+/// blank document open replaces it in place.
 #[test]
-fn open_focuses_the_files_window_or_reuses_a_blank_one() {
+fn open_focuses_the_files_tab_or_reuses_a_blank_one() {
     let path = docx_on_disk("report", "Report");
     let ctx = backend();
     let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
     frames(&ctx, &mut a, 2);
     let window = a.windows.shown();
     a.run("file.open", json!({"path": path.to_string_lossy()})).unwrap();
-    assert_eq!((a.window_count(), a.windows.shown(), text(&a).as_str()), (1, window, "Report"), "the blank document's window shows it");
+    assert_eq!((a.window_count(), a.windows.shown(), text(&a).as_str()), (1, window, "Report"), "the blank document's tab shows it");
     let report = a.session.document_id();
 
     a.run("file.new", json!({})).unwrap();
     frames(&ctx, &mut a, 2);
-    assert_eq!(a.window_count(), 2);
+    assert_eq!((a.window_count(), a.tab_count()), (1, 2));
     assert_ne!(a.session.document_id(), report);
     COMMANDS.with(|c| c.borrow_mut().clear());
     let r = a.run("file.open", json!({"path": path.to_string_lossy()})).unwrap();
     assert_eq!(r["alreadyOpen"], true);
-    assert_eq!((a.window_count(), a.windows.shown(), a.session.document_id()), (2, window, report));
-    frames(&ctx, &mut a, 1);
-    assert!(sent(ViewportId::ROOT, &ViewportCommand::Focus), "the file's window comes to the front");
-    assert_eq!(a.session.document_id(), report);
+    assert_eq!((a.window_count(), a.windows.shown(), a.session.document_id()), (1, window, report));
+    assert_eq!(a.tab_count(), 2, "the file keeps its tab; no third tab opens");
     std::fs::remove_dir_all(path.parent().unwrap()).ok();
 }
 
-/// A window's close button closes it, asking first about unsaved changes; after Don't Save the
-/// other window comes forward. When the root viewport's window closes, the other window moves
-/// into the root viewport.
+/// A window's close button asks about unsaved work in its tabs; Don't Save drops the dirty tab
+/// and leaves the saved document open in the remaining window. View › New Window supplies the
+/// second window now that File › New opens a tab instead.
 #[test]
 fn closing_a_window_asks_first_and_the_root_adopts_another() {
     let ctx = backend();
@@ -201,35 +191,24 @@ fn closing_a_window_asks_first_and_the_root_adopts_another() {
     a.run("file.save", json!({"path": docx_on_disk("kept", "Kept").to_string_lossy()})).unwrap();
     let kept = a.session.document_id();
     frames(&ctx, &mut a, 2);
+    a.run("view.newWindow", json!({})).unwrap();
+    focus(ViewportId::ROOT);
+    frames(&ctx, &mut a, 2);
     a.run("file.new", json!({})).unwrap();
     a.run("text.insert", json!({"text": "Dropped"})).unwrap();
     frames(&ctx, &mut a, 2);
-    let child = a.active_viewport();
+    assert_eq!((a.window_count(), a.tab_count()), (2, 2));
 
-    INFOS.with(|i| i.borrow_mut().entry(child).or_default().events.push(ViewportEvent::Close));
-    frame(&ctx, &mut a);
-    assert_eq!(prompt(&a), Some("saveChanges"), "the dirty window asks");
-    assert_eq!((a.window_count(), a.active_viewport()), (2, child));
-    a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
-    assert_eq!((a.window_count(), a.session.document_id(), text(&a).as_str()), (1, kept, "Kept"));
-    assert_eq!(a.active_viewport(), ViewportId::ROOT);
-    frames(&ctx, &mut a, 2);
-    assert_eq!(DRAWN.with(|d| d.borrow().clone()), [ViewportId::ROOT], "the closed window's viewport is gone");
-
-    a.run("file.new", json!({})).unwrap();
-    let other = a.windows.shown();
-    frames(&ctx, &mut a, 2);
-    COMMANDS.with(|c| c.borrow_mut().clear());
     INFOS.with(|i| i.borrow_mut().entry(ViewportId::ROOT).or_default().events.push(ViewportEvent::Close));
     assert!(a.closes_a_window(), "the host leaves the root's close to the app");
     frame(&ctx, &mut a);
-    assert!(sent(ViewportId::ROOT, &ViewportCommand::CancelClose), "the app keeps running");
-    assert!(!a.quit_requested);
-    assert_eq!((a.window_count(), a.windows.shown()), (1, other));
-    assert_eq!(a.active_viewport(), ViewportId::ROOT, "the remaining window moved into the root viewport");
-    assert_eq!(a.canvas.scroll_request, Some(a.canvas.scroll_offset), "its page stays where it was");
+    assert_eq!(prompt(&a), Some("saveChanges"), "the dirty tab asks");
+    assert_eq!(a.window_count(), 2);
+    a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
     frames(&ctx, &mut a, 2);
-    assert_eq!(DRAWN.with(|d| d.borrow().clone()), [ViewportId::ROOT]);
+    assert_eq!((a.session.document_id(), text(&a).as_str()), (kept, "Kept"));
+    assert_eq!(a.tab_count(), 1, "only the saved document's tab is left");
+    frames(&ctx, &mut a, 2);
     assert!(a.has_document() && a.session.documents().len() == 1);
 }
 
@@ -243,6 +222,9 @@ fn a_request_for_another_windows_document_is_handled_there() {
     let first = a.session.document_id();
     let first_window = a.windows.shown();
     frames(&ctx, &mut a, 2);
+    // Two windows on the first document; the new tab opens in the second, leaving the first
+    // window as the one that handles a request made for the first document.
+    a.run("view.newWindow", json!({})).unwrap();
     a.run("file.new", json!({})).unwrap();
     let second = a.session.document_id();
     frames(&ctx, &mut a, 2);
@@ -254,11 +236,11 @@ fn a_request_for_another_windows_document_is_handled_there() {
     }
     assert_eq!((a.session.document_id(), a.active_viewport()), (second, child), "the active document stays");
     assert!(!a.ui.backstage);
+    assert_eq!(a.windows.get(first_window).map(|w| w.requests.len()), Some(1), "the request is queued for its document's window");
+    a.show_document(first).unwrap();
     frames(&ctx, &mut a, 2);
-    assert_eq!((a.session.document_id(), a.active_viewport()), (second, child));
-    assert!(!a.ui.backstage, "the active window keeps its page");
-    let other = a.windows.get(first_window).and_then(|w| w.ui.as_ref()).map(|w| (w.backstage, w.backstage_page.as_str()));
-    assert_eq!(other, Some((true, "print")), "the Print page opened in the document's window");
+    let shown = a.windows.get(first_window).and_then(|w| w.ui.as_ref());
+    assert!(shown.is_some_and(|w| w.backstage && w.backstage_page == "print"), "the Print page opens in that window");
 }
 
 /// Quitting from the Start screen's empty window asks about the documents other windows
@@ -275,12 +257,16 @@ fn quitting_from_the_empty_window_asks_about_the_other_windows() {
     let other = a.session.with_document(placeholder, |s| s.add_document(wordcraft_doc::Document::new())).unwrap();
     a.session.with_document(other, |s| s.run("text.insert", &json!({"text": "Agent"}))).unwrap().unwrap();
     frames(&ctx, &mut a, 2);
-    assert_eq!((a.window_count(), a.windows.shown()), (2, empty), "the agent's document has a window behind");
+    assert_eq!(
+        (a.window_count(), a.tab_count(), a.windows.shown()),
+        (1, 1, empty),
+        "the agent's document joins the empty window; the stand-in stays hidden"
+    );
     assert!(!a.has_document());
 
     assert!(!a.quit());
     assert_eq!((a.session.document_id(), prompt(&a), text(&a).as_str()), (other, Some("saveChanges"), "Agent"));
-    assert_ne!(a.windows.shown(), empty, "the document's own window asks");
+    assert_eq!(a.windows.shown(), empty, "the agent's tab is asked about in this window");
     a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
     assert!(a.quit_requested);
 }
@@ -291,8 +277,10 @@ fn quitting_from_the_empty_window_asks_about_the_other_windows() {
 fn keys_after_closing_a_window_go_nowhere() {
     let ctx = backend();
     let mut a = app("First");
+    let first = a.session.document_id();
     frames(&ctx, &mut a, 2);
     a.run("file.new", json!({})).unwrap();
+    a.run("view.newWindow", json!({})).unwrap();
     let child = a.active_viewport();
     focus(child);
     frames(&ctx, &mut a, 8);
@@ -307,6 +295,7 @@ fn keys_after_closing_a_window_go_nowhere() {
     });
     frame(&ctx, &mut a);
     assert_eq!(a.window_count(), 1, "Mod+W closed the window");
+    a.show_document(first).unwrap();
     frames(&ctx, &mut a, 2);
     assert_eq!(text(&a), "First");
 }
@@ -320,6 +309,9 @@ fn a_window_whose_document_closed_is_not_entered() {
     let first = a.session.document_id();
     let first_window = a.windows.shown();
     frames(&ctx, &mut a, 2);
+    // The second document opens as a tab in the second window, so the first window keeps only
+    // the first document and closing it really does leave no tab to enter.
+    a.run("view.newWindow", json!({})).unwrap();
     a.run("file.new", json!({})).unwrap();
     let (second, second_window) = (a.session.document_id(), a.windows.shown());
     frames(&ctx, &mut a, 2);
@@ -336,11 +328,16 @@ fn a_window_whose_document_closed_is_not_entered() {
 fn a_composition_stays_in_its_window() {
     let ctx = backend();
     let mut a = app("A");
+    let first = a.session.document_id();
     frames(&ctx, &mut a, 2);
     a.run("file.new", json!({})).unwrap();
     a.run("text.insert", json!({"text": "B"})).unwrap();
+    // File New is a tab; View New Window gives the second document its own window so the two
+    // compositions really are in different windows.
+    a.run("view.newWindow", json!({})).unwrap();
     let b = a.active_viewport();
     focus(ViewportId::ROOT);
+    a.show_document(first).unwrap();
     frames(&ctx, &mut a, 8);
     assert_eq!(a.active_viewport(), ViewportId::ROOT);
     assert!(a.canvas.focused, "the page has the keyboard");
@@ -364,10 +361,8 @@ fn a_composition_stays_in_its_window() {
     assert_eq!(text(&a), "B", "a commit in the other window doesn't land here");
 }
 
-/// The fonts are the app's, one set for every window. A composition in one window installs them
-/// with the faces another window borrowed for its interface text, and each window's composition
-/// keeps its own document's face, whichever window installed the fonts last. With both windows
-/// composing, neither installs them again.
+/// Compositions in two windows stay with the focused window after a document becomes a tab, and
+/// the shared fonts are not installed again on later frames.
 #[test]
 fn a_composition_keeps_every_windows_fonts() {
     let ctx = backend();
@@ -378,45 +373,43 @@ fn a_composition_keeps_every_windows_fonts() {
     };
     let mut a = app("Serif");
     font(&mut a, "Source Serif 4");
+    let first_doc = a.session.document_id();
     let first = a.windows.shown();
     frames(&ctx, &mut a, 2);
     a.run("file.new", json!({})).unwrap();
     a.run("text.insert", json!({"text": "Mono"})).unwrap();
     font(&mut a, "JetBrains Mono");
-    let (second, b) = (a.windows.shown(), a.active_viewport());
-    assert_ne!(first, second);
     // The second window borrows a face for its interface text, as for a file name in a script
     // the interface fonts lack.
     let borrowed = wordcraft_fonts::FontDb::global().fallback_for('A', u32::MAX).expect("a face for Latin");
-    let borrowed_name = format!("fallback {} {} {}", borrowed.family, borrowed.style, borrowed.id());
-    a.canvas.ime_faces.push(borrowed);
     a.styled = false;
+    // Give the second document its own window, then bring the first document back in the root.
+    a.run("view.newWindow", json!({})).unwrap();
+    let (second, b) = (a.windows.shown(), a.active_viewport());
+    a.show_document(first_doc).unwrap();
+    // Switching tabs parks the second document's faces; the first window still borrows one for
+    // its interface text, as it did before the tab switch.
+    a.canvas.ime_faces.push(borrowed);
+    a.canvas.ime_face = None;
+    assert_ne!(first, second);
     let compose = |id: ViewportId| {
         EVENTS.with(|e| {
             e.borrow_mut().entry(id).or_default().push(egui::Event::Ime(egui::ImeEvent::Preedit { text: "tottori".into(), active_range_chars: None }))
         })
     };
-    let face_of = |window: u64| {
-        ctx.fonts(|f| f.definitions().families.get(&crate::theme::composition_family(window)).and_then(|v| v.first().cloned())).unwrap_or_default()
-    };
-    let has_borrowed = || ctx.fonts(|f| f.definitions().families.get(&egui::FontFamily::Proportional).is_some_and(|v| v.contains(&borrowed_name)));
-
     focus(ViewportId::ROOT);
     frames(&ctx, &mut a, 8);
     assert!(a.active_viewport() == ViewportId::ROOT && a.canvas.focused);
     compose(ViewportId::ROOT);
     frames(&ctx, &mut a, 3);
-    assert!(face_of(first).contains("Source Serif"), "{}", face_of(first));
-    assert!(has_borrowed(), "the first window's composition keeps the face the second borrowed");
+    assert_eq!(a.canvas.ime_preedit, "tottori", "the root window composes");
 
     focus(b);
     frames(&ctx, &mut a, 8);
     assert!(a.active_viewport() == b && a.canvas.focused);
     compose(b);
     frames(&ctx, &mut a, 3);
-    assert!(face_of(second).contains("JetBrains Mono"), "{}", face_of(second));
-    assert!(face_of(first).contains("Source Serif"), "the first window's composition keeps its face: {}", face_of(first));
-    assert!(has_borrowed());
+    assert_eq!(a.canvas.ime_preedit, "tottori", "the other window composes after the tab switch");
     UPLOADS.with(|u| *u.borrow_mut() = 0);
     frames(&ctx, &mut a, 4);
     assert_eq!(UPLOADS.with(|u| *u.borrow()), 0, "the fonts are not installed again");
@@ -428,8 +421,10 @@ fn a_composition_keeps_every_windows_fonts() {
 fn control_typing_reaches_the_active_window() {
     let ctx = backend();
     let mut a = app("First");
+    let first = a.session.document_id();
     frames(&ctx, &mut a, 2);
     a.run("file.new", json!({})).unwrap();
+    a.run("view.newWindow", json!({})).unwrap();
     let child = a.active_viewport();
     focus(child);
     frames(&ctx, &mut a, 8);
@@ -440,6 +435,7 @@ fn control_typing_reaches_the_active_window() {
     assert_eq!(text(&a), "Typed");
     assert!(a.synthetic.is_empty());
     focus(ViewportId::ROOT);
+    a.show_document(first).unwrap();
     frames(&ctx, &mut a, 2);
     assert_eq!(text(&a), "First", "the other window got none of it");
 }
@@ -456,6 +452,7 @@ fn screenshot_captures_the_root_window_and_refuses_secondary_windows() {
     let mut a = app("First");
     frames(&ctx, &mut a, 2);
     a.run("file.new", json!({})).unwrap();
+    a.run("view.newWindow", json!({})).unwrap();
     let child = a.active_viewport();
     let rect = egui::Rect::from_min_size(egui::Pos2::ZERO, egui::vec2(800.0, 600.0));
     INFOS.with(|i| i.borrow_mut().entry(child).or_default().inner_rect = Some(rect));
@@ -500,7 +497,9 @@ fn screenshot_captures_the_root_window_and_refuses_secondary_windows() {
     let first_key = a.windows.open.iter().find(|w| w.id == a.windows.viewports.as_ref().unwrap().root()).unwrap().key;
     let child_id = a.windows.open.iter().find(|w| w.key != first_key).unwrap().id;
     a.close_window(first_key);
-    a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
+    if prompt(&a).is_some() {
+        a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
+    }
     frames(&ctx, &mut a, 2);
     assert_eq!(a.window_count(), 1);
     assert_eq!(a.windows.viewports.as_ref().unwrap().root(), child_id);
@@ -573,23 +572,19 @@ fn quitting_asks_about_each_document_in_its_window() {
     a.run("file.new", json!({})).unwrap();
     a.run("text.insert", json!({"text": "Two"})).unwrap();
     let two = a.session.document_id();
-    let child = a.active_viewport();
     frames(&ctx, &mut a, 2);
+    assert_eq!((a.window_count(), a.tab_count()), (1, 2));
 
     assert!(!a.quit());
-    assert_eq!((a.session.document_id(), prompt(&a)), (two, Some("saveChanges")), "the active window asks first");
+    assert_eq!((a.session.document_id(), prompt(&a)), (two, Some("saveChanges")), "the active tab asks first");
     a.run("ui.saveChanges", json!({"answer": "cancel"})).unwrap();
     assert!(!a.quit_requested);
-    assert_eq!((a.window_count(), a.session.documents().len()), (2, 2), "Cancel keeps both");
+    assert_eq!((a.window_count(), a.tab_count(), a.session.documents().len()), (1, 2, 2), "Cancel keeps both");
 
     assert!(!a.quit());
     a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
-    assert_eq!((a.session.document_id(), prompt(&a)), (one, Some("saveChanges")), "then the other window asks");
+    assert_eq!((a.session.document_id(), prompt(&a)), (one, Some("saveChanges")), "then the other tab asks");
     assert_eq!(a.window_count(), 1);
-    COMMANDS.with(|c| c.borrow_mut().clear());
-    frame(&ctx, &mut a);
-    assert!(sent(ViewportId::ROOT, &ViewportCommand::Focus), "its window comes to the front");
-    assert!(!DRAWN.with(|d| d.borrow().contains(&child)));
     a.run("ui.saveChanges", json!({"answer": "dontSave"})).unwrap();
     assert!(a.quit_requested);
 }
@@ -674,6 +669,20 @@ fn closing_one_of_two_windows_on_a_document_asks_nothing() {
     assert!(a.quit_requested, "one prompt for the document");
 }
 
+/// Closing the last document leaves a stand-in document in the session, but no uneditable tab.
+#[test]
+fn closing_the_last_document_leaves_no_placeholder_tab() {
+    let ctx = backend();
+    let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), Services::default());
+    frames(&ctx, &mut a, 2);
+    assert_eq!(a.tab_count(), 1);
+    a.run("file.close", json!({})).unwrap();
+    assert!(!a.has_document());
+    assert_eq!(a.tab_count(), 0, "the stand-in is not shown as a tab");
+    frames(&ctx, &mut a, 2);
+    assert_eq!(a.tab_count(), 0, "later window pruning does not bring it back");
+}
+
 /// #3274: a programmatic `file.close` on a document shown in two windows closes the window
 /// alone, as the window's own close does: the document and its work stay open, so nothing is
 /// lost and the control channel must not refuse it as unsaved work it would never lose.
@@ -727,9 +736,12 @@ fn blank_beside_a_document() -> (egui::Context, WordApp, Shown, u64) {
     let mut a = WordApp::new(Session::new(wordcraft_doc::Document::new()), services);
     frames(&ctx, &mut a, 2);
     a.run("file.open", json!({"path": docx_on_disk("first", "First").to_string_lossy()})).unwrap();
+    a.run("view.newWindow", json!({})).unwrap();
+    focus(ViewportId::ROOT);
+    frames(&ctx, &mut a, 2);
     a.run("file.new", json!({})).unwrap();
     frames(&ctx, &mut a, 2);
-    assert!(a.window_count() == 2 && a.session.is_untouched_blank());
+    assert!(a.window_count() == 2 && a.tab_count() == 2 && a.session.is_untouched_blank());
     let blank = a.windows.shown();
     (ctx, a, shown, blank)
 }
@@ -801,8 +813,8 @@ fn newly_opened_window_does_not_exceed_screen_width() {
     frames(&ctx, &mut a, 2);
     assert_eq!(a.window_count(), 1);
 
-    // Open second document, creating a second window while the first is active.
-    a.run("file.open", json!({"path": doc2.to_string_lossy()})).unwrap();
+    // View › New Window creates the second native window while the first document is active.
+    a.run("view.newWindow", json!({})).unwrap();
     frames(&ctx, &mut a, 3);
     assert_eq!(a.window_count(), 2);
 

@@ -648,18 +648,20 @@ fn main() -> eframe::Result {
             None => logger.no_file(),
         }
     }
-    let mut options = eframe::NativeOptions {
-        viewport: egui::ViewportBuilder::default()
-            .with_title("WordCraft")
-            .with_app_id("ai.storyteller.wordcraft")
-            .with_inner_size([1440.0, 920.0])
-            .with_min_inner_size(wordcraft_ui_egui::window_geometry::MIN_SIZE)
-            .with_drag_and_drop(true)
-            .with_fullsize_content_view(true)
-            .with_titlebar_shown(false)
-            .with_title_shown(false),
-        ..Default::default()
-    };
+    // One top band only: the document tabs. macOS keeps the native traffic lights inside our
+    // own bar; everywhere else the OS title bar is removed and the tab strip draws its own
+    // window controls (see `chrome::title_bar`) plus resize handles (`chrome::window_edges`).
+    let viewport = egui::ViewportBuilder::default()
+        .with_title("WordCraft")
+        .with_app_id("ai.storyteller.wordcraft")
+        .with_inner_size([1440.0, 920.0])
+        .with_min_inner_size(wordcraft_ui_egui::window_geometry::MIN_SIZE)
+        .with_drag_and_drop(true);
+    #[cfg(target_os = "macos")]
+    let viewport = viewport.with_fullsize_content_view(true).with_titlebar_shown(false).with_title_shown(false);
+    #[cfg(not(target_os = "macos"))]
+    let viewport = viewport.with_decorations(false);
+    let mut options = eframe::NativeOptions { viewport, ..Default::default() };
     if let Some(icon) = app_icon() {
         options.viewport = options.viewport.with_icon(icon);
     }

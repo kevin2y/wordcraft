@@ -921,8 +921,9 @@ fn back_arrow_returns_to_the_page_with_accessibility_on() {
     assert!(h.state().canvas.widget_id.is_some(), "the page has been drawn");
     h.state_mut().run("ui.backstage", json!({"value": true})).unwrap();
     h.run_steps(4);
-    // The arrow heads the File page's side bar; it has no label to find it by.
-    let arrow = egui::pos2(26.0, 32.0);
+    // The arrow heads the File page's side bar; it has no label to find it by. On Windows/Linux
+    // the fixed tab strip now sits above the File page, so the side bar starts 38 pt lower.
+    let arrow = egui::pos2(26.0, 70.0);
     h.event(egui::Event::PointerMoved(arrow));
     for pressed in [true, false] {
         h.event(egui::Event::PointerButton { pos: arrow, button: egui::PointerButton::Primary, pressed, modifiers: egui::Modifiers::NONE });
@@ -941,7 +942,7 @@ fn clicking_beside_the_back_arrow_does_not_close_the_file_page() {
     h.state_mut().run("ui.backstage", json!({"value": true})).unwrap();
     h.run_steps(4);
     // Well clear of the chevron (centred at x=26) but still inside the old 200px-wide row.
-    click_at(&mut h, egui::pos2(100.0, 32.0));
+    click_at(&mut h, egui::pos2(100.0, 70.0));
     assert!(h.state().ui.backstage, "clicking beside the arrow leaves the File page open");
 }
 
@@ -1041,7 +1042,7 @@ fn options_back_arrow_with_accessibility_on() {
             a.ui.start_screen = true;
             assert!(a.start_screen());
         }
-        let back = if mac { mac_chevron(&a) } else { egui::pos2(26.0, 32.0) };
+        let back = if mac { mac_chevron(&a) } else { egui::pos2(26.0, 70.0) };
         let mut h = a11y_harness(a);
         if !start {
             h.state_mut().run("ui.backstage", json!({"value": true})).unwrap();
