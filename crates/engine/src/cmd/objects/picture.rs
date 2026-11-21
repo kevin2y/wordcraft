@@ -195,17 +195,13 @@ pub(super) fn adjust_media(
     })?;
     let out = f(img)?;
     let png = wordcraft_geom::picture::encode_png(&out).map_err(CmdError::Failed)?;
+    let key = s.doc.add_media(png, "png");
     // Chain onto the ultimate original (the base's, or the current picture's when the base
     // is itself derived), so Reset Picture always finds it.
     let cur = selected(s).and_then(|(_, o)| match o {
         InlineObject::Image { media, .. } => Some(media),
         _ => None,
     });
-    let source = s.doc.image_sources.get(base).or_else(|| cur.as_ref().and_then(|m| s.doc.image_sources.get(m))).cloned();
-    let key = s.doc.add_media(png, "png");
-    if let Some(source) = source {
-        s.doc.image_sources.insert(key.clone(), source);
-    }
     let orig = s
         .originals
         .get(base)

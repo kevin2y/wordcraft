@@ -125,10 +125,9 @@ pub fn specs() -> Vec<CommandSpec> {
         .when(has_picture),
         CommandSpec::new("picture.reset", "Reset Picture", "Picture Format › Adjust", reset).when(has_picture),
         CommandSpec::new("picture.change", "Change Picture", "Picture Format › Adjust", |s, v| {
-            let path = p::str(v, "path");
             let bytes = if let Some(d) = p::str(v, "data") {
                 crate::cmd::insert::base64_decode(d).ok_or_else(|| CmdError::Params("bad base64".into()))?
-            } else if let Some(path) = path {
+            } else if let Some(path) = p::str(v, "path") {
                 crate::io::read_file(path).map_err(CmdError::Failed)?
             } else {
                 return Err(CmdError::Params("`path` or `data` required".into()));
@@ -140,9 +139,6 @@ pub fn specs() -> Vec<CommandSpec> {
                     _ => CmdError::Failed("not a supported image".into()),
                 })?;
             let key = s.doc.add_media(bytes.clone(), crate::cmd::insert::image_ext(&bytes));
-            if let Some(path) = path {
-                s.doc.image_sources.insert(key.clone(), std::path::PathBuf::from(path));
-            }
             with_obj(s, |o| {
                 if let InlineObject::Image { media, w, h, crop, .. } = o {
                     *media = key.clone();

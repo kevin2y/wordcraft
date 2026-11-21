@@ -461,7 +461,6 @@ fn save(s: &mut Session, v: &Value) -> CmdResult {
     let rewritten = exact.is_none() && !s.md_file.is_empty() && super::md_source::is_markdown_file(&path);
     let written = match &exact {
         Some(text) => crate::io::save_text_path(&path, text),
-        None if super::md_source::is_markdown_file(&path) => crate::io::save_markdown_with_images(&path, copy.as_ref().unwrap_or(&s.doc), &opts),
         None => crate::io::save_path_with(&path, copy.as_ref().unwrap_or(&s.doc), password, &opts),
     };
     if let Err(e) = written {

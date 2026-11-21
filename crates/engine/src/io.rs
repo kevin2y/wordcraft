@@ -539,17 +539,12 @@ pub fn open_path_in(path: &std::path::Path, password: Option<&str>, region: &wor
         return Ok((doc, false));
     }
     if matches!(ext_of(&name).as_str(), "md" | "markdown") {
-        // As for HTML, a Markdown image path resolves against the file's own folder.
+        // As for HTML, a Markdown image path resolves against the file's own folder. The path
+        // becomes the picture's media key, so a later save writes it back instead of copying or
+        // renaming the image.
         let images = LocalImages::new(path.parent().unwrap_or(std::path::Path::new("")));
         let text = wordcraft_formats::txt::decode(&bytes);
         let mut doc = wordcraft_formats::markdown::import_on_with(&text, &|src| images.load(src), &region_page(region));
-        // Keep each loaded picture's own file name, so a later edit-and-save doesn't rename it
-        // to a generated `image.png`. The exact-text save path needs none of this.
-        for (key, data) in &doc.media {
-            if let Some(source) = images.source_of(data) {
-                doc.image_sources.insert(key.clone(), source);
-            }
-        }
         fit_pictures(&mut doc);
         opened(&mut doc);
         return Ok((doc, false));
@@ -583,10 +578,10 @@ pub fn read_document(path: &std::path::Path) -> Result<Vec<u8>, String> {
     }
 }
 
-/// The pictures an HTML file names by a path relative to its folder.
+/// The pictures an HTML or Markdown file names by a path relative to its folder.
 ///
 /// Only regular files inside the folder (after resolving `..` and symlinks) are read. The folder is
-/// the HTML file's own, which `open_path_with` has already checked against the automation read root. URLs
+/// the file's own, which `open_path_in` has already checked against the automation read root. URLs
 /// (`http:`, `file:`…) and absolute paths are not followed. Each file is read at most once and
 /// at most `max_file` bytes of it; every reference, cached or not, counts against a budget for
 /// the whole document, so one large picture can't be multiplied by referencing it many times.
@@ -640,12 +635,6 @@ impl LocalImages {
             cache.push((path, data.clone()));
         }
         Some(data)
-    }
-
-    /// The file a previously loaded picture's bytes came from, so opening a Markdown file can
-    /// remember each picture's own name for a later save.
-    pub(crate) fn source_of(&self, bytes: &[u8]) -> Option<std::path::PathBuf> {
-        self.cache.borrow().iter().find(|(_, b)| b.as_slice() == bytes).map(|(p, _)| p.clone())
     }
 
     /// Take `n` bytes from the budget; `None` (and the budget emptied) when there aren't enough.
@@ -929,102 +918,6 @@ pub fn save_text_path(path: &std::path::Path, text: &str) -> Result<(), String> 
 /// Write `text` to `path` as it is (a Markdown file's own text), as safely as [`save_path_with`].
 #[cfg(target_arch = "wasm32")]
 pub fn save_text_path(path: &std::path::Path, _text: &str) -> Result<(), String> {
-    Err(format!("{}: files are saved through the browser on the web", path.display()))
-}
-
-/// Save a rewritten Markdown document with the picture files its destinations name.
-///
-/// Markdown has no place to embed a picture here: the writer emits `image.png` and the next
-/// open must find it beside the file. A picture inserted from a file keeps that file's name
-/// (copied here when it lives elsewhere); one made from bytes keeps a generated name. Writing
-/// those neighbours keeps a save/reopen round trip from turning pictures into alt text.
-#[cfg(not(target_arch = "wasm32"))]
-pub fn save_markdown_with_images(path: &std::path::Path, doc: &Document, opts: &ExportOptions) -> Result<(), String> {
-    crate::file_access::check_write(&path.to_string_lossy())?;
-    let dir = path.parent().filter(|p| !p.as_os_str().is_empty()).unwrap_or(std::path::Path::new("."));
-    let used = std::cell::RefCell::new(std::collections::HashSet::<String>::new());
-    let plan = wordcraft_formats::markdown::export_plan_named(doc, &|key, fallback| {
-        let data = doc.media.get(key).map(|b| b.as_slice()).unwrap_or(&[]);
-        let source = doc.image_sources.get(key).map(|p| p.as_path());
-        companion_name(source, fallback, dir, data, &used)
-    });
-    let mut bytes = plan.text.into_bytes();
-    if opts.markup && opts.comments {
-        bytes = wordcraft_formats::comments::append("md", doc, bytes);
-    }
-    safe_save::write(path, &bytes).map_err(|e| format!("{}: {e}", path.display()))?;
-    for (name, data) in plan.images {
-        // Companion names come from a file name; never let one escape the folder.
-        if name.is_empty() || name.contains(['/', '\\']) || name.starts_with('.') {
-            continue;
-        }
-        let image_path = dir.join(name);
-        crate::file_access::check_write(&image_path.to_string_lossy())?;
-        // The file may already be there (a picture from this very folder): don't rewrite it when
-        // its bytes are unchanged, but do replace it when the picture was edited in the document.
-        if std::fs::read(&image_path).map(|old| old == data.as_slice()).unwrap_or(false) {
-            continue;
-        }
-        safe_save::write(&image_path, &data).map_err(|e| format!("{}: {e}", image_path.display()))?;
-    }
-    Ok(())
-}
-
-/// The name a picture's destination uses in the saved Markdown.
-///
-/// A picture that came from a file takes that file's name, subject to being a plain, safe file
-/// name. If a different file with that name already sits beside the `.md`, a numbered name is
-/// used instead so a save never clobbers an unrelated file; the picture's own file (in this
-/// folder) may be replaced in place, so edits to it are saved. Pictures inserted from bytes use
-/// the writer's generated name.
-#[cfg(not(target_arch = "wasm32"))]
-fn companion_name(
-    source: Option<&std::path::Path>,
-    fallback: &str,
-    dir: &std::path::Path,
-    data: &[u8],
-    used: &std::cell::RefCell<std::collections::HashSet<String>>,
-) -> String {
-    let base = source
-        .and_then(|s| s.file_name())
-        .and_then(|n| n.to_str())
-        .filter(|n| !n.is_empty() && !n.starts_with('.') && !n.contains(['/', '\\', ':', '\0', '\n', '\r']))
-        .unwrap_or(fallback);
-    let own_file = source.is_some_and(|s| {
-        s.file_name().and_then(|n| n.to_str()) == Some(base)
-            && s.parent().is_some_and(|p| {
-                let a = std::fs::canonicalize(p).ok();
-                let b = std::fs::canonicalize(dir).ok();
-                a.is_some() && a == b
-            })
-    });
-    let mut used = used.borrow_mut();
-    for n in 0..u32::MAX {
-        let name = if n == 0 {
-            base.to_string()
-        } else {
-            match base.rsplit_once('.') {
-                Some((stem, ext)) => format!("{stem}{}.{ext}", n + 1),
-                None => format!("{base}{}", n + 1),
-            }
-        };
-        if used.contains(&name) {
-            continue;
-        }
-        let free = match std::fs::read(dir.join(&name)) {
-            Ok(old) => old == data || (own_file && name == base),
-            Err(_) => true,
-        };
-        if free {
-            used.insert(name.clone());
-            return name;
-        }
-    }
-    fallback.to_string()
-}
-
-#[cfg(target_arch = "wasm32")]
-pub fn save_markdown_with_images(path: &std::path::Path, _doc: &Document, _opts: &ExportOptions) -> Result<(), String> {
     Err(format!("{}: files are saved through the browser on the web", path.display()))
 }
 

@@ -146,12 +146,6 @@ pub struct Document {
     /// export reports them); never saved, never drawn, ignored by `==`.
     #[serde(skip)]
     pub missing_pictures: MissingPictures,
-    /// Where each picture's bytes came from, by media key, when it was read from a local file.
-    /// A Markdown save uses this to name the companion image after its file (and copy it next to
-    /// the `.md`) instead of a generated `image.png`. In-memory only, like [`Self::kept`]: not
-    /// serialized and ignored by `==`.
-    #[serde(skip)]
-    pub image_sources: std::collections::BTreeMap<String, std::path::PathBuf>,
     /// Cumulative fit-to-page typography reduction state; internal tracking outside user-visible custom properties.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fit_state: Option<shrink::FitState>,
