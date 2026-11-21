@@ -1,4 +1,5 @@
 use super::balloons::over_balloon;
+use super::code_blocks::over_code_copy;
 use super::links::{field_showing_code, follow_link, is_generated_bookmark_link, link_under};
 use super::navigation::page_at;
 use super::story::{enters_header_footer, in_text_box, part_kind, text_box_host};
@@ -168,7 +169,7 @@ fn handle_page_pointer(app: &mut WordApp, pointer: PagePointer<'_>) {
         None
     };
     let hf_enter = enters_header_footer(app, story, hf_zone);
-    let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.contains_pointer() && !over_balloon(app, p);
+    let pressed = ui.input(|i| i.pointer.primary_pressed()) && resp.contains_pointer() && !over_balloon(app, p) && !over_code_copy(app, p);
     // The equation frame's grip and options strip stay in the equation (the strip's click opens
     // its menu, in `show`).
     if pressed && on_frame {

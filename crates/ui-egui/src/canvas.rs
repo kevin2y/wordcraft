@@ -19,6 +19,7 @@ mod column_ruler;
 mod context_menu;
 #[cfg(test)]
 pub(crate) use context_menu::issue_heading;
+mod code_blocks;
 mod cursor;
 mod geometry;
 mod input;
@@ -34,6 +35,7 @@ mod story;
 #[cfg(test)]
 use balloons::balloon_text;
 use balloons::{balloons, dashed, over_balloon};
+use code_blocks::code_block_buttons;
 pub use balloons::{deselect_balloon, select_balloon};
 use context_menu::{context_menu, context_suggestions};
 use cursor::{caret_color_at, preedit_cursor_chars};
@@ -320,6 +322,9 @@ pub struct CanvasState {
     balloon_h: f32,
     /// Screen rects of the comment balloons last frame (for the control channel and tests).
     pub balloon_rects: Vec<(u32, Rect)>,
+    /// Screen rects of the code-block Copy buttons last frame, so a press on one doesn't also
+    /// place the caret on the page under it.
+    pub(crate) code_copy_rects: Vec<Rect>,
     /// A paste event arrived since the last Mod+V release (see `keys::canvas_events`).
     pub(crate) pasted: bool,
     /// A V (or Paste key) press reached the canvas since its last release. egui-winit keeps Mod+V
@@ -572,6 +577,7 @@ impl Default for CanvasState {
             balloon_reply: false,
             balloon_h: 0.0,
             balloon_rects: Vec::new(),
+            code_copy_rects: Vec::new(),
             table_tool: None,
             table_stroke: None,
             table_resize: None,
@@ -1957,6 +1963,8 @@ pub fn show(app: &mut WordApp, ui: &mut Ui) {
         app.canvas.page_content_rects = geo.rects.clone();
         app.canvas.page_rects_document = Some(app.session.document_id());
         let view_rect = ui.clip_rect();
+        // Code-block Copy buttons sit over the page raster, like the comment balloons.
+        code_block_buttons(app, ui, &painter, &rects, &layout, geo.scale, view_rect);
         if floating_comments(app) {
             // Its own layer, so presses on the card never reach the canvas under it.
             let ctx = ui.ctx().clone();

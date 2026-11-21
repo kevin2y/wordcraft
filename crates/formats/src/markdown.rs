@@ -4,11 +4,37 @@ use std::collections::HashSet;
 use std::sync::Arc;
 
 use wordcraft_doc::para::InlineObject;
+use wordcraft_doc::props::{Border, BorderStyle, Borders, Rgb};
 use wordcraft_doc::{Block, Document, SectionProps};
 
 pub use craft_markdown::{Refs, escape, parse, parse_inlines};
 
 pub use crate::markdown_images::ImageLoader;
+
+/// A fenced block's lines are imported as consecutive `Code` paragraphs. Give the style a light
+/// shading and a thin box so the layout groups them into one visibly bordered code block. Code
+/// isn't prose: mark it (and inline code spans) `noProof` so the live spelling/grammar squiggles
+/// don't cover it.
+fn style_code_blocks(doc: &mut Document) {
+    let styles = Arc::make_mut(&mut doc.styles);
+    for style in &mut styles.styles {
+        if style.id == "Code" {
+            style.para.shading = Some(Rgb(0xF6, 0xF8, 0xFA));
+            style.para.borders =
+                Some(Borders::box_(Border { style: BorderStyle::Single, width: 0.5, color: Some(Rgb(0xD0, 0xD7, 0xDE)), space: 6.0 }));
+            style.chr.no_proof = Some(true);
+        }
+    }
+    // Inline code spans carry the mono font directly rather than using the Code style.
+    for block in &mut doc.body {
+        let Block::Para(p) = Arc::make_mut(block) else { continue };
+        for run in &mut p.runs {
+            if run.props.font.as_deref() == Some("Courier New") {
+                run.props.no_proof = Some(true);
+            }
+        }
+    }
+}
 
 fn shared_section(page: &SectionProps) -> craft_wordmodel::SectionProps {
     let mut d = Document::new();
@@ -29,7 +55,9 @@ pub fn import(text: &str) -> Document {
 /// [`import`] that resolves local image paths through `images` before parsing.
 pub fn import_with(text: &str, images: ImageLoader<'_>) -> Document {
     let source = crate::markdown_images::inline(text, images);
-    wordcraft_docx::from_shared_model(craft_markdown::import(&source)).unwrap_or_default()
+    let mut doc = wordcraft_docx::from_shared_model(craft_markdown::import(&source)).unwrap_or_default();
+    style_code_blocks(&mut doc);
+    doc
 }
 
 pub fn import_on(text: &str, page: &SectionProps) -> Document {
@@ -39,7 +67,9 @@ pub fn import_on(text: &str, page: &SectionProps) -> Document {
 /// [`import_on`] that resolves local image paths through `images` before parsing.
 pub fn import_on_with(text: &str, images: ImageLoader<'_>, page: &SectionProps) -> Document {
     let source = crate::markdown_images::inline(text, images);
-    wordcraft_docx::from_shared_model(craft_markdown::import_on(&source, &shared_section(page))).unwrap_or_default()
+    let mut doc = wordcraft_docx::from_shared_model(craft_markdown::import_on(&source, &shared_section(page))).unwrap_or_default();
+    style_code_blocks(&mut doc);
+    doc
 }
 
 /// [`import_on`] returning the document and the 0-based starting line of each top-level block.

@@ -488,6 +488,39 @@ fn code_blocks_and_rules() {
 }
 
 #[test]
+fn markdown_code_blocks_get_shading_and_a_bordered_box() {
+    let md = "```\n# 克隆\ncargo run\n```\n";
+    let d = import("md", md.as_bytes()).unwrap().unwrap();
+    let style = d.styles.styles.iter().find(|s| s.id == "Code").expect("the markdown Code style");
+    assert!(style.para.shading.is_some(), "the code block has a light background");
+    let borders = style.para.borders.expect("the code block has a border");
+    assert!(borders.top.is_some() && borders.bottom.is_some());
+    assert!(borders.left.is_some() && borders.right.is_some());
+    assert!(borders.between.is_none(), "neighbouring code lines share one box");
+    assert_eq!(style.chr.no_proof, Some(true), "spell-check squiggles don't belong on code");
+    let code = d
+        .body
+        .iter()
+        .find_map(|b| match b.as_ref() {
+            wordcraft_doc::Block::Para(p) if p.props.style.as_deref() == Some("Code") => Some(p),
+            _ => None,
+        })
+        .expect("a code paragraph");
+    let resolved = d.styles.resolve_char(Some("Code"), &code.runs[0].props);
+    assert!(resolved.no_proof, "the style's noProof reaches the proofing pass");
+
+    let d = import("md", b"Run `cargo run` now.\n").unwrap().unwrap();
+    let inline = d
+        .body
+        .iter()
+        .filter_map(|b| b.as_para())
+        .flat_map(|p| &p.runs)
+        .find(|r| r.props.font.as_deref() == Some("Courier New"))
+        .expect("an inline code run");
+    assert_eq!(inline.props.no_proof, Some(true), "inline code gets no squiggles too");
+}
+
+#[test]
 #[cfg_attr(coverage, ignore = "coverage instrumentation skews the measured time")]
 fn deep_nesting_is_bounded() {
     let html = "<div><table><tr><td>".repeat(5000) + "x";

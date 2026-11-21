@@ -6488,3 +6488,75 @@ fn a_linked_text_box_shows_and_follows_its_link_from_inside() {
     let (start, _) = wordcraft_engine::cmd::insert::bookmark_range(&s.doc, "Spot").unwrap();
     assert!(s.sel.is_collapsed() && s.sel.focus == start, "the caret went to the bookmark: {:?}", s.sel);
 }
+
+/// A fenced Markdown block imports as consecutive `Code` paragraphs. Hovering shows one Copy
+/// button at their top-right corner, and pressing it doesn't also place the caret on the page.
+#[test]
+fn a_code_block_has_one_copy_button_that_takes_the_press() {
+    use wordcraft_doc::props::{Border, BorderStyle, Borders, Rgb};
+    use wordcraft_doc::{CharProps, Paragraph, para_block};
+    let mut doc = wordcraft_doc::Document::new();
+    std::sync::Arc::make_mut(&mut doc.styles).upsert(wordcraft_doc::Style {
+        id: "Code".into(),
+        name: "Code".into(),
+        para: wordcraft_doc::ParaProps {
+            shading: Some(Rgb(0xF6, 0xF8, 0xFA)),
+            borders: Some(Borders::box_(Border { style: BorderStyle::Single, width: 0.5, color: Some(Rgb(0xD0, 0xD7, 0xDE)), space: 6.0 })),
+            ..Default::default()
+        },
+        chr: CharProps { no_proof: Some(true), ..Default::default() },
+        ..Default::default()
+    });
+    doc.body = vec![
+        para_block(Paragraph::with_text("# 克隆", CharProps::default()).styled("Code")),
+        para_block(Paragraph::with_text("cargo run", CharProps::default()).styled("Code")),
+        para_block(Paragraph::with_text("After the block", CharProps::default())),
+    ];
+    let mut a = WordApp::new(wordcraft_engine::Session::new(doc), crate::Services::default());
+    a.session.sel = wordcraft_engine::Selection::caret(Pos::body(2, 0));
+    let mut h = egui_kittest::Harness::builder().with_size(egui::vec2(1440.0, 900.0)).build_ui_state(
+        |ui, app: &mut WordApp| {
+            let ctx = ui.ctx().clone();
+            app.logic(&ctx);
+            app.ui(ui);
+        },
+        a,
+    );
+    steps(&mut h, 6);
+    // The button hugs the shade's top-right corner, not the longest line's end.
+    let l = h.state_mut().session.layout();
+    let shade = l.index[&(StoryRef::Body, wordcraft_doc::Path::top(0))]
+        .iter()
+        .find_map(|(pi, ii)| {
+            let it = l.pages[*pi].items.get(ii.checked_sub(1)?)?;
+            match it {
+                Placed::Fill { rect, .. } => Some((*pi, rect)),
+                _ => None,
+            }
+        })
+        .expect("the code block has a shaded box");
+    let pr = h.state().canvas.page_rects[shade.0];
+    let ps = pr.width() / l.pages[shade.0].w;
+    let box_screen = egui::Rect::from_min_max(
+        egui::pos2(pr.min.x + shade.1.x * ps, pr.min.y + shade.1.y * ps),
+        egui::pos2(pr.min.x + shade.1.right() * ps, pr.min.y + shade.1.bottom() * ps),
+    );
+    assert!(h.state().canvas.code_copy_rects.is_empty(), "no button until the pointer enters the block");
+    h.event(egui::Event::PointerMoved(box_screen.center()));
+    steps(&mut h, 2);
+    assert_eq!(h.state().canvas.code_copy_rects.len(), 1, "the two code lines share one button");
+    let btn = h.state().canvas.code_copy_rects[0];
+    assert!((box_screen.right() - btn.right()).abs() <= 3.0, "button: {btn:?}, box: {box_screen:?}");
+    assert!((btn.top() - box_screen.top()).abs() <= 3.0, "button: {btn:?}, box: {box_screen:?}");
+    let before = h.state().session.sel.focus.clone();
+    let at = btn.center();
+    h.event(egui::Event::PointerMoved(at));
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: true, modifiers: Default::default() });
+    h.event(egui::Event::PointerButton { pos: at, button: egui::PointerButton::Primary, pressed: false, modifiers: Default::default() });
+    steps(&mut h, 3);
+    assert!(h.state().status_msg.as_ref().is_some_and(|(s, _)| s.contains("Code copied")), "{:?}", h.state().status_msg);
+    assert_eq!(h.state().session.sel.focus, before, "the button took the press, so the caret stayed put");
+    h.event(egui::Event::PointerMoved(egui::pos2(0.0, 0.0)));
+    steps(&mut h, 2);
+    assert!(h.state().canvas.code_copy_rects.is_empty(), "the button hides when the pointer leaves");
+}
