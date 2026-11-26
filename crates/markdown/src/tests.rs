@@ -846,7 +846,7 @@ fn unsafe_local_destination_keeps_generated_key() {
     let png = tiny_png();
     // A scheme-like or traversing destination must not become a media key, even if a loader
     // (unwisely) returns bytes for it.
-    for dest in ["../escape.png", "http://host/x.png", "/abs/x.png"] {
+    for dest in ["../escape.png", "http://host/x.png", "/abs/x.png", "photo.png#frag", "photo.png?x=1"] {
         let doc = import_with(&format!("![x]({dest})\n"), &|_| Some(png.clone()));
         assert!(!doc.media.contains_key(dest), "{dest} must not be a media key");
         assert!(doc.media.keys().all(|k| !k.contains("..")), "{dest}: {:?}", doc.media.keys().collect::<Vec<_>>());

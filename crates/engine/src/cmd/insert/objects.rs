@@ -74,15 +74,21 @@ pub fn base64_decode(s: &str) -> Option<Vec<u8>> {
 pub use craft_mime::transfer::base64 as base64_encode;
 
 pub(crate) fn picture(s: &mut Session, v: &Value) -> CmdResult {
+    let picked = p::str(v, "path").map(str::to_string);
     let bytes = if let Some(d) = p::str(v, "data") {
         base64_decode(d).ok_or_else(|| CmdError::Params("bad base64 data".into()))?
-    } else if let Some(path) = p::str(v, "path") {
+    } else if let Some(path) = picked.as_deref() {
         crate::io::read_file(path).map_err(CmdError::Failed)?
     } else {
         s.push_ui_request(json!({"open": "insertPicture"}));
         return sel_result(s);
     };
-    place_picture(s, bytes, p::f32(v, "width"), p::str(v, "alt").unwrap_or(""))
+    place_picture(s, bytes, p::f32(v, "width"), p::str(v, "alt").unwrap_or(""), picked.as_deref())
+}
+
+/// [`crate::io::picture_media_name`] for the session's open document.
+pub(crate) fn picture_media_name(s: &Session, picked: &str, ext: &str) -> String {
+    crate::io::picture_media_name(s.path.as_deref(), picked, ext)
 }
 
 /// The media extension of an encoded image by its magic bytes, as the picture probe accepted it
@@ -103,7 +109,7 @@ pub(crate) fn image_ext(bytes: &[u8]) -> &'static str {
 /// its natural size at 96 ppi), never wider than the text column. The caret ends after it, so a
 /// script's next typing doesn't replace it (#965); Picture Format commands still act on it. The
 /// app selects a picture the person inserts (`WordApp::run`).
-fn place_picture(s: &mut Session, bytes: Vec<u8>, width: Option<f32>, alt: &str) -> CmdResult {
+fn place_picture(s: &mut Session, bytes: Vec<u8>, width: Option<f32>, alt: &str, picked: Option<&str>) -> CmdResult {
     if bytes.len() > 200 << 20 {
         return Err(CmdError::Failed("image is larger than 200 MB".into()));
     }
@@ -117,7 +123,13 @@ fn place_picture(s: &mut Session, bytes: Vec<u8>, width: Option<f32>, alt: &str)
             None => return Err(CmdError::Failed("not a supported image (PNG, JPEG, GIF, WebP, BMP, WMF, EMF)".into())),
         },
     };
-    let key = s.doc.add_media(bytes, ext);
+    let key = match picked {
+        Some(path) => {
+            let name = picture_media_name(s, path, ext);
+            s.doc.add_media_named(bytes, ext, &name)
+        }
+        None => s.doc.add_media(bytes, ext),
+    };
     // Fitted to the text width.
     let max_w = s.doc.sections().first().map(|(_, sp)| sp.text_width()).unwrap_or(468.0);
     let (mut w, mut h) = (natural_w, natural_h);
@@ -179,7 +191,7 @@ pub(super) fn icon(s: &mut Session, v: &Value) -> CmdResult {
     if png.is_empty() {
         return Err(CmdError::Failed("couldn't draw the icon".into()));
     }
-    let mut r = place_picture(s, png, Some(size), icon.name)?;
+    let mut r = place_picture(s, png, Some(size), icon.name, None)?;
     r["icon"] = json!(icon.id);
     Ok(r)
 }

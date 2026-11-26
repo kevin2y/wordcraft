@@ -5,7 +5,7 @@ use std::sync::Arc;
 use wordcraft_doc::props::{Border, BorderStyle, Borders, Rgb};
 use wordcraft_doc::{Block, Document, SectionProps};
 
-pub use craft_markdown::{ImageLoader, Refs, escape, parse, parse_inlines};
+pub use craft_markdown::{ImageLoader, Refs, escape, parse, parse_inlines, safe_destination as safe_image_destination};
 
 /// A fenced block's lines are imported as consecutive `Code` paragraphs. Give the style a light
 /// shading and a thin box so the layout groups them into one visibly bordered code block. Code

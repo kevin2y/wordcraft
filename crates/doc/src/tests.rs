@@ -144,6 +144,19 @@ fn parts_and_media() {
 }
 
 #[test]
+fn add_media_named_keeps_the_chosen_name() {
+    let mut d = Document::new();
+    let bytes = vec![1, 2, 3];
+    assert_eq!(d.add_media_named(bytes.clone(), "png", "images/photo.png"), "images/photo.png");
+    assert_eq!(d.media["images/photo.png"].as_slice(), bytes.as_slice());
+    // A name already taken gets a suffix before the extension, in its folder.
+    assert_eq!(d.add_media_named(vec![4], "png", "images/photo.png"), "images/photo-2.png");
+    // Bad names fall back to the generated key.
+    assert_eq!(d.add_media_named(vec![5], "png", ""), "image3.png");
+    assert_eq!(d.add_media_named(vec![6], "png", "bad\nname.png"), "image4.png");
+}
+
+#[test]
 #[cfg_attr(coverage, ignore = "coverage instrumentation skews the measured time")]
 fn many_distinct_media_add_in_linear_time() {
     // An import with tens of thousands of small distinct images (same length, differing only at

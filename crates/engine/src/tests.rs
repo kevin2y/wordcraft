@@ -6251,6 +6251,60 @@ fn markdown_pictures_load_relative_to_the_file_and_save_back_to_that_path() {
     let _ = std::fs::remove_dir_all(&dir);
 }
 
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn toolbar_inserted_picture_saves_the_picked_filename() {
+    // Insert › Pictures passes the selected path to `insert.picture`. The media key — and so the
+    // Markdown destination — must be that path relative to the open file, not `image1.png`.
+    let dir = scratch_dir("md-insert-img");
+    std::fs::create_dir_all(dir.join("images")).unwrap();
+    let png = tiny_png();
+    let image = dir.join("images/Desk Photo.png");
+    std::fs::write(&image, &png).unwrap();
+    let md = dir.join("note.md");
+    std::fs::write(&md, "Text\n").unwrap();
+
+    let mut session = s();
+    run(&mut session, "file.open", json!({"path": md.to_string_lossy()}));
+    run(&mut session, "insert.picture", json!({"path": image.to_string_lossy()}));
+    assert!(session.doc.media.contains_key("images/Desk Photo.png"), "{:?}", session.doc.media.keys().collect::<Vec<_>>());
+
+    run(&mut session, "file.save", json!({}));
+    let written = std::fs::read_to_string(&md).unwrap();
+    assert!(written.contains("![](<images/Desk Photo.png>)"), "{written}");
+    assert!(!written.contains("image1.png"), "{written}");
+    assert_eq!(std::fs::read(&image).unwrap(), png, "the picked file is left where it was");
+    let _ = std::fs::remove_dir_all(&dir);
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+#[test]
+fn picture_inserted_from_outside_the_document_folder_keeps_its_filename() {
+    // With no relative path inside the document's folder, keep at least the selected file name;
+    // there is still no copy into that folder.
+    let root = scratch_dir("md-insert-outside");
+    let doc_dir = root.join("doc");
+    let picked_dir = root.join("picked");
+    std::fs::create_dir_all(&doc_dir).unwrap();
+    std::fs::create_dir_all(&picked_dir).unwrap();
+    let png = tiny_png();
+    let image = picked_dir.join("chosen.png");
+    std::fs::write(&image, &png).unwrap();
+    let md = doc_dir.join("note.md");
+    std::fs::write(&md, "Text\n").unwrap();
+
+    let mut session = s();
+    run(&mut session, "file.open", json!({"path": md.to_string_lossy()}));
+    run(&mut session, "insert.picture", json!({"path": image.to_string_lossy()}));
+    assert!(session.doc.media.contains_key("chosen.png"), "{:?}", session.doc.media.keys().collect::<Vec<_>>());
+
+    run(&mut session, "file.save", json!({}));
+    let written = std::fs::read_to_string(&md).unwrap();
+    assert!(written.contains("![](chosen.png)"), "{written}");
+    assert!(!doc_dir.join("chosen.png").exists(), "no copy is made");
+    let _ = std::fs::remove_dir_all(&root);
+}
+
 /// A fresh, empty scratch folder for one test.
 #[cfg(not(target_arch = "wasm32"))]
 fn scratch_dir(name: &str) -> std::path::PathBuf {
@@ -11608,7 +11662,7 @@ fn picture_change_keeps_the_replacement_format() {
             media = m.clone();
         }
     });
-    assert!(media.ends_with(".jpeg") || media.ends_with(".jpg"), "the JPEG keeps its format: {media}");
+    assert_eq!(media, "second.jpg", "the replacement keeps its picked file name and format");
     let back = wordcraft_docx::read(&wordcraft_docx::write(&s.doc).unwrap()).unwrap();
     assert_eq!(back.media.get(&media).map(|b| b.as_slice()), Some(jpeg.as_slice()), "the saved part is the JPEG");
     let _ = std::fs::remove_dir_all(&dir);
