@@ -408,6 +408,7 @@ Imported Word 97–2003 `.doc`/`.dot` files now ask for a supported DOCX target 
 - 2026-10-15: Find opens Navigation on Results; editing the query restores Results after manual Headings/Pages navigation. Typed and selected-text searches retain document contents (#2096).
 
 | Date | What landed |
+| 2026-11-25 | trivial | Windows file icons follow the document type: each file-association ProgId's `DefaultIcon` is its own original `.ico` (`assets/app-icon/file-types/`), so .docx, templates, .rtf, .odt, .md and .txt no longer all show the app icon once WordCraft is that type's default handler (#295) |
 | 2026-11-19 | trivial | Progress log: WPS-style two-row header (document tab strip, AutoSave/QAT on the ribbon command strip); multi-document tabs in one native window; File New/Open add tabs and View New Window keeps separate windows |
 | 2026-11-17 | trivial | Progress log: file formats, codecs and protocols come from craft-libs (#778) |
 | 2026-11-15 | trivial | Progress log: Get the Missing Fonts (download pages for missing fonts their publisher gives away) |

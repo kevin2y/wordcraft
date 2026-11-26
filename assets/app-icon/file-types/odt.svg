@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- WordCraft .odt file icon (original; MIT OR Apache-2.0). Drawn for this repository; not derived from any other product's artwork. -->
+  <path d="M96 64 H336 L416 144 V448 H96 Z" fill="#1098AD" stroke="#0b0b0c" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M336 64 V144 H416 Z" fill="#ffffff" opacity="0.22"/>
+  <path d="M336 64 V144 H416" fill="none" stroke="#0b0b0c" stroke-width="14" stroke-linejoin="round"/>
+  <g stroke="#efe9dc" stroke-width="20" stroke-linecap="round">
+    <line x1="136" y1="200" x2="376" y2="200"/>
+    <line x1="136" y1="256" x2="376" y2="256"/>
+    <line x1="136" y1="312" x2="284" y2="312"/>
+  </g>
+  <circle cx="368" cy="368" r="40" fill="none" stroke="#efe9dc" stroke-width="20"/>
+</svg>

@@ -16,7 +16,10 @@ function Read-Rows($Database, [string] $Sql, [int] $Columns) {
     while ($null -ne ($record = $view.Fetch())) {
       try {
         $values = @(for ($i = 1; $i -le $Columns; $i++) {
-          $record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @($i))
+          $value = $record.GetType().InvokeMember('StringData', 'GetProperty', $null, $record, @($i))
+          # A default registry value has a null Name; compare it as '' so the policy rows below
+          # (DefaultIcon entries) match instead of failing on a null.
+          if ($null -eq $value) { '' } else { $value }
         })
         ,$values
       } finally { [void][Runtime.InteropServices.Marshal]::FinalReleaseComObject($record) }

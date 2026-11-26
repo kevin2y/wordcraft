@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- WordCraft .docm file icon (original; MIT OR Apache-2.0). Drawn for this repository; not derived from any other product's artwork. -->
+  <rect width="512" height="512" rx="112" fill="#5B34C9"/>
+  <path d="M200 80 H390 L448 138 V424 H200 Z" fill="#8B5CF6"/>
+  <path d="M390 80 L448 138 H390 Z" fill="#C4A9FF"/>
+  <path d="M390 80 V138 H448" fill="none" stroke="#4A26B3" stroke-width="8" stroke-linejoin="round"/>
+  <path d="M92 196 L170 372 L256 232 L342 372 L420 196" fill="none" stroke="#ffffff" stroke-width="52" stroke-linecap="round" stroke-linejoin="round"/>
+  <circle cx="404" cy="386" r="44" fill="#5B34C9"/>
+  <rect x="396" y="358" width="16" height="36" rx="8" fill="#ffffff"/>
+  <circle cx="404" cy="406" r="9" fill="#ffffff"/>
+</svg>

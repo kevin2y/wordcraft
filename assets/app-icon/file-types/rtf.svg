@@ -1,0 +1,11 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- WordCraft .rtf file icon (original; MIT OR Apache-2.0). Drawn for this repository; not derived from any other product's artwork. -->
+  <path d="M96 64 H336 L416 144 V448 H96 Z" fill="#2F9E44" stroke="#0b0b0c" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M336 64 V144 H416 Z" fill="#ffffff" opacity="0.22"/>
+  <path d="M336 64 V144 H416" fill="none" stroke="#0b0b0c" stroke-width="14" stroke-linejoin="round"/>
+  <g fill="none" stroke="#efe9dc" stroke-width="18" stroke-linecap="round">
+    <path d="M136 200 q20 -26 40 0 t40 0 t40 0 t40 0 t40 0 t40 0"/>
+    <path d="M136 276 q20 -26 40 0 t40 0 t40 0 t40 0 t40 0 t40 0"/>
+    <path d="M136 352 q20 -26 40 0 t40 0 t40 0 t40 0"/>
+  </g>
+</svg>

@@ -1,0 +1,12 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- WordCraft .md file icon (original; MIT OR Apache-2.0). Drawn for this repository; not derived from any other product's artwork. -->
+  <path d="M96 64 H336 L416 144 V448 H96 Z" fill="#862E9C" stroke="#0b0b0c" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M336 64 V144 H416 Z" fill="#ffffff" opacity="0.22"/>
+  <path d="M336 64 V144 H416" fill="none" stroke="#0b0b0c" stroke-width="14" stroke-linejoin="round"/>
+  <rect x="136" y="196" width="240" height="40" rx="18" fill="#efe9dc"/>
+  <g stroke="#efe9dc" stroke-width="18" stroke-linecap="round">
+    <line x1="136" y1="284" x2="376" y2="284"/>
+    <line x1="136" y1="332" x2="300" y2="332"/>
+  </g>
+  <path d="M196 372 L256 424 L316 372" fill="none" stroke="#efe9dc" stroke-width="20" stroke-linecap="round" stroke-linejoin="round"/>
+</svg>

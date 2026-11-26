@@ -1,4 +1,4 @@
-{
+﻿{
   "id": "wordcraft",
   "name": "WordCraft",
   "upgradeCode": "075497F9-E861-45D0-9C7F-A74F8C34E6BA",
@@ -13,7 +13,17 @@
   ],
   "payloads": [
     "wordcraft-cli.exe",
-    "wordcraft.exe"
+    "wordcraft.exe",
+    "wordcraft-doc.ico",
+    "wordcraft-docm.ico",
+    "wordcraft-docx.ico",
+    "wordcraft-dot.ico",
+    "wordcraft-dotm.ico",
+    "wordcraft-dotx.ico",
+    "wordcraft-md.ico",
+    "wordcraft-odt.ico",
+    "wordcraft-rtf.ico",
+    "wordcraft-txt.ico"
   ],
   "registry": [
     [
@@ -285,6 +295,66 @@
       "Software\\Classes\\Applications\\wordcraft.exe\\SupportedTypes",
       ".txt",
       ""
+    ],
+    [
+      "0",
+      "WordCraft.Document\\DefaultIcon",
+      "",
+      "\"[#WordCraftDocxIcon]\",0"
+    ],
+    [
+      "0",
+      "WordCraft.DocumentMacroEnabled\\DefaultIcon",
+      "",
+      "\"[#WordCraftDocmIcon]\",0"
+    ],
+    [
+      "0",
+      "WordCraft.Template\\DefaultIcon",
+      "",
+      "\"[#WordCraftDotxIcon]\",0"
+    ],
+    [
+      "0",
+      "WordCraft.TemplateMacroEnabled\\DefaultIcon",
+      "",
+      "\"[#WordCraftDotmIcon]\",0"
+    ],
+    [
+      "0",
+      "WordCraft.LegacyDocument\\DefaultIcon",
+      "",
+      "\"[#WordCraftDocIcon]\",0"
+    ],
+    [
+      "0",
+      "WordCraft.LegacyTemplate\\DefaultIcon",
+      "",
+      "\"[#WordCraftDotIcon]\",0"
+    ],
+    [
+      "0",
+      "WordCraft.RichText\\DefaultIcon",
+      "",
+      "\"[#WordCraftRtfIcon]\",0"
+    ],
+    [
+      "0",
+      "WordCraft.OpenDocumentText\\DefaultIcon",
+      "",
+      "\"[#WordCraftOdtIcon]\",0"
+    ],
+    [
+      "0",
+      "WordCraft.Markdown\\DefaultIcon",
+      "",
+      "\"[#WordCraftMarkdownIcon]\",0"
+    ],
+    [
+      "0",
+      "WordCraft.PlainText\\DefaultIcon",
+      "",
+      "\"[#WordCraftTextIcon]\",0"
     ]
   ],
   "mode": "dualScope"

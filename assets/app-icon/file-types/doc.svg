@@ -1,0 +1,13 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
+  <!-- WordCraft .doc file icon (original; MIT OR Apache-2.0). Drawn for this repository; not derived from any other product's artwork. -->
+  <path d="M96 64 H336 L416 144 V448 H96 Z" fill="#0B7285" stroke="#0b0b0c" stroke-width="14" stroke-linejoin="round"/>
+  <path d="M336 64 V144 H416 Z" fill="#ffffff" opacity="0.22"/>
+  <path d="M336 64 V144 H416" fill="none" stroke="#0b0b0c" stroke-width="14" stroke-linejoin="round"/>
+  <g stroke="#efe9dc" stroke-width="18" stroke-linecap="round">
+    <line x1="136" y1="184" x2="376" y2="184"/>
+    <line x1="136" y1="232" x2="376" y2="232"/>
+    <line x1="136" y1="280" x2="376" y2="280"/>
+    <line x1="136" y1="328" x2="376" y2="328"/>
+    <line x1="136" y1="376" x2="268" y2="376"/>
+  </g>
+</svg>

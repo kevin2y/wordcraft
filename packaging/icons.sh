@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Regenerate every app icon from assets/app-icon/wordcraft.svg.
+# Regenerate every app icon from assets/app-icon/wordcraft.svg, and the per-type document icons
+# from assets/app-icon/file-types/*.svg.
 #
 # Needs: resvg (brew install resvg / cargo install resvg). On macOS, iconutil also writes the
 # .icns. The outputs are committed, so builds and packaging never need these tools.
@@ -46,6 +47,17 @@ for s in 16 20 24 32 40 48 64 128 256; do
   ICO_PNGS+=("$TMP/ico-$s.png")
 done
 (cd "$ROOT" && cargo run -q -p xtask -- ico "$DIR/wordcraft.ico" "${ICO_PNGS[@]}")
+
+# Per-type document icons (#295): one .ico per file type, so each Windows ProgId's DefaultIcon can
+# be its own artwork instead of the app icon. Sources live in assets/app-icon/file-types/.
+for name in docx docm dotx dotm doc dot rtf odt md txt; do
+  ICO_PNGS=()
+  for s in 16 20 24 32 40 48 64 128 256; do
+    render "$DIR/file-types/$name.svg" "$s" "$TMP/file-$name-$s.png"
+    ICO_PNGS+=("$TMP/file-$name-$s.png")
+  done
+  (cd "$ROOT" && cargo run -q -p xtask -- ico "$DIR/file-types/$name.ico" "${ICO_PNGS[@]}")
+done
 
 # macOS .icns.
 if command -v iconutil >/dev/null; then
