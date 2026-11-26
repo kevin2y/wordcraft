@@ -187,7 +187,18 @@ if ($env:CRAFT_FONTS_DIR) {
 }
 $Zip = Join-Path $Dist "wordcraft-$Version-windows-$Arch-portable.zip"
 Remove-Item -Force $Zip -ErrorAction SilentlyContinue
-Compress-Archive -Path $Portable -DestinationPath $Zip
+# Scanning software (Defender and the like) briefly holds a handle on an executable copied seconds ago,
+# which makes Compress-Archive fail with "being used by another process". Wait and try again.
+for ($attempt = 1; ; $attempt++) {
+  try {
+    Compress-Archive -Path $Portable -DestinationPath $Zip -ErrorAction Stop
+    break
+  } catch {
+    if ($attempt -ge 5) { throw }
+    Remove-Item -Force $Zip -ErrorAction SilentlyContinue
+    Start-Sleep -Seconds 3
+  }
+}
 
 # Smoke-test the CLI when this machine can run it. An ARM64 build made on an x64 runner can't run
 # here; .github/workflows/windows-arm64.yml installs and runs it on ARM64 instead.
