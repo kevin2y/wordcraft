@@ -839,6 +839,64 @@ impl Document {
         key
     }
 
+    /// Add a media item under `name` when possible; returns its key.
+    ///
+    /// Unlike [`add_media`], this keeps a name the caller chose — a picture picked from disk —
+    /// instead of a generated `imageN` key, so a Markdown export can write that name back. A taken
+    /// name gets a numeric suffix before its extension; an empty or overlong name falls back to
+    /// [`add_media`]. Equal bytes may live under both a named and a generated key: each inserted
+    /// picture keeps the name it was inserted from.
+    pub fn add_media_named(&mut self, bytes: Vec<u8>, ext: &str, name: &str) -> String {
+        const MAX_NAME: usize = 1024;
+        let name = name.trim();
+        if name.is_empty() || name.len() > MAX_NAME || name.contains(['\0', '\r', '\n']) {
+            return self.add_media(bytes, ext);
+        }
+        let key = {
+            let ix = &mut self.media_index;
+            if ix.len != self.media.len() {
+                ix.rebuild(&self.media);
+            }
+            if let Some(k) = ix.find(&self.media, &bytes)
+                && k == name
+            {
+                return k;
+            }
+            let mut key = name.to_string();
+            if self.media.contains_key(&key) {
+                let slash = key.rfind('/').map_or(0, |i| i + 1);
+                let dir = key.get(..slash).unwrap_or("").to_string();
+                let base = key.get(slash..).unwrap_or("");
+                let (stem, suffix) =
+                    base.rsplit_once('.').map(|(s, e)| (s.to_string(), format!(".{e}"))).unwrap_or_else(|| (base.to_string(), String::new()));
+                let mut n = 2u32;
+                while self.media.contains_key(&key) {
+                    key = format!("{dir}{stem}-{n}{suffix}");
+                    if n == u32::MAX {
+                        let mut i = self.media.len().saturating_add(1);
+                        loop {
+                            let candidate = format!("image{i}.{ext}");
+                            if !self.media.contains_key(&candidate) {
+                                key = candidate;
+                                break;
+                            }
+                            i = i.saturating_add(1);
+                        }
+                        break;
+                    }
+                    n = n.saturating_add(1);
+                }
+            }
+            key
+        };
+        let data = Arc::new(bytes);
+        self.media.insert(key.clone(), data.clone());
+        let ix = &mut self.media_index;
+        ix.by_bytes.entry(data).or_insert_with(|| key.clone());
+        ix.len = self.media.len();
+        key
+    }
+
     /// The value of a custom property (names compare case-insensitively, as in Word).
     pub fn custom_prop(&self, name: &str) -> Option<&str> {
         self.custom_props.iter().find(|p| p.name.eq_ignore_ascii_case(name)).map(|p| p.value.as_str())

@@ -136,9 +136,10 @@ fn adopt_image_paths(doc: &mut Document, ctx: ImageCtx<'_>) {
 }
 
 /// Whether `dest` is a plain relative path safe to use as a media key and to write back to a
-/// Markdown file: relative, no scheme or network path, no `..` component, no control characters.
-fn safe_destination(dest: &str) -> bool {
-    if dest.is_empty() || dest.len() > model::MAX_LINK || dest.starts_with("//") || dest.contains(['\0', '\n', '\r', '\\']) {
+/// Markdown file: relative, no scheme or network path, no `..` component, no control characters,
+/// and no fragment or query (a local reader would strip them before finding the file).
+pub fn safe_destination(dest: &str) -> bool {
+    if dest.is_empty() || dest.len() > model::MAX_LINK || dest.starts_with("//") || dest.contains(['\0', '\n', '\r', '\\', '#', '?']) {
         return false;
     }
     if dest.split_once(':').is_some_and(|(scheme, _)| !scheme.contains('/')) {

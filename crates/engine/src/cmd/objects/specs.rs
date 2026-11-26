@@ -125,9 +125,10 @@ pub fn specs() -> Vec<CommandSpec> {
         .when(has_picture),
         CommandSpec::new("picture.reset", "Reset Picture", "Picture Format › Adjust", reset).when(has_picture),
         CommandSpec::new("picture.change", "Change Picture", "Picture Format › Adjust", |s, v| {
+            let picked = p::str(v, "path").map(str::to_string);
             let bytes = if let Some(d) = p::str(v, "data") {
                 crate::cmd::insert::base64_decode(d).ok_or_else(|| CmdError::Params("bad base64".into()))?
-            } else if let Some(path) = p::str(v, "path") {
+            } else if let Some(path) = picked.as_deref() {
                 crate::io::read_file(path).map_err(CmdError::Failed)?
             } else {
                 return Err(CmdError::Params("`path` or `data` required".into()));
@@ -138,7 +139,14 @@ pub fn specs() -> Vec<CommandSpec> {
                     wordcraft_geom::picture::Refusal::Unsupported(why) => CmdError::Failed(why.into()),
                     _ => CmdError::Failed("not a supported image".into()),
                 })?;
-            let key = s.doc.add_media(bytes.clone(), crate::cmd::insert::image_ext(&bytes));
+            let ext = crate::cmd::insert::image_ext(&bytes);
+            let key = match picked.as_deref() {
+                Some(path) => {
+                    let name = crate::cmd::insert::picture_media_name(s, path, ext);
+                    s.doc.add_media_named(bytes.clone(), ext, &name)
+                }
+                None => s.doc.add_media(bytes.clone(), ext),
+            };
             with_obj(s, |o| {
                 if let InlineObject::Image { media, w, h, crop, .. } = o {
                     *media = key.clone();

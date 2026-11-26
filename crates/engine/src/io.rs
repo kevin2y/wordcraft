@@ -552,6 +552,36 @@ pub fn open_path_in(path: &std::path::Path, password: Option<&str>, region: &wor
     open_bytes_in(&name, &bytes, password, region)
 }
 
+/// The media name for a picture the person picked from disk. A file inside the open document's
+/// folder keeps its relative path, which is what Markdown's local loader reads back; one outside
+/// it keeps at least its chosen file name. Anything unsafe falls back to a generated name.
+///
+/// This lives in the file-access gateway: unlike commands, it may canonicalize paths to decide
+/// whether the pick is inside the document's folder.
+#[cfg(not(target_arch = "wasm32"))]
+pub(crate) fn picture_media_name(doc: Option<&std::path::Path>, picked: &str, ext: &str) -> String {
+    let file = std::path::Path::new(picked);
+    let relative =
+        doc.and_then(|doc| doc.parent().filter(|p| !p.as_os_str().is_empty())).and_then(|dir| std::fs::canonicalize(dir).ok()).and_then(|dir| {
+            let file = std::fs::canonicalize(file).ok()?;
+            file.strip_prefix(&dir).ok().map(|r| r.to_path_buf())
+        });
+    let chosen = relative
+        .as_deref()
+        .map(|p| p.to_string_lossy().replace('\\', "/"))
+        .or_else(|| file.file_name().map(|n| n.to_string_lossy().into_owned()))
+        .unwrap_or_default();
+    if wordcraft_formats::markdown::safe_image_destination(&chosen) { chosen } else { format!("image.{ext}") }
+}
+
+/// [`picture_media_name`] on the web: there are no local paths, so only a plain file name can be
+/// kept as a media key.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn picture_media_name(_doc: Option<&std::path::Path>, picked: &str, ext: &str) -> String {
+    let chosen = std::path::Path::new(picked).file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+    if wordcraft_formats::markdown::safe_image_destination(&chosen) { chosen } else { format!("image.{ext}") }
+}
+
 /// Largest document file opened by path.
 #[cfg(not(target_arch = "wasm32"))]
 const MAX_DOCUMENT: u64 = 2 << 30;
