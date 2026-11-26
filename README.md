@@ -47,8 +47,8 @@
 <br>
 
 <p align="center">
-  <img src="docs/images/hero.png" alt="WordCraft with the Home tab of the ribbon open over a two-page document titled The Open Studio Handbook. The Navigation pane on the left lists the document's headings, the Styles gallery shows live previews of Normal, Heading 1, Title and Subtitle, and a word in the first paragraph is selected." width="100%">
-  <br><sub><b>The Open Studio Handbook</b>, WordCraft's built-in sample: the ribbon, live Styles gallery, rulers and the Navigation pane.</sub>
+  <img src="docs/images/hero.png" alt="WordCraft with the Home tab of the ribbon, a tab bar showing two open documents (The Open Studio Handbook active, Document2 in the background), and the sample document laid out as two side-by-side pages. The Styles gallery shows live previews of Normal, Heading 1, Title and Subtitle." width="100%">
+  <br><sub><b>The Open Studio Handbook</b>, WordCraft's built-in sample: the ribbon, live Styles gallery, rulers, side-by-side page layout, and a tab bar for working on multiple documents at once.</sub>
 </p>
 
 > [!NOTE]
